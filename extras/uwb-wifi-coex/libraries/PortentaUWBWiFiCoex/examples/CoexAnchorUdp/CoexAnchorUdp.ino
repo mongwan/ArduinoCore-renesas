@@ -30,6 +30,18 @@
 #define ANCHOR_ONE_TO_ONE 1
 #endif
 
+/*
+ * COEX_SEND_ALL = 1: send every measurement, failed ones too (d=65535,
+ * "st" = status). For single-board tests: with no tag the controller still
+ * runs a ranging round every 200 ms and the UWB chip reports each one over
+ * SPI1, so this gives ~5 datagrams/s that race the UWB SPI traffic.
+ * Default 0: only valid distances are sent.
+ */
+#ifndef COEX_SEND_ALL
+#define COEX_SEND_ALL 0
+#endif
+static volatile uint32_t g_uwbCallbacks = 0;  // ranging notifications seen
+
 static const IPAddress kServer(SERVER_IP);
 static const uint16_t kPort = SERVER_PORT;
 
@@ -40,18 +52,20 @@ static void rangingHandler(UWBRangingData& rangingData) {
   if (rangingData.measureType() != (uint8_t)uwb::MeasurementType::TWO_WAY) {
     return;
   }
+  g_uwbCallbacks = g_uwbCallbacks + 1;
   RangingMeasures twr = rangingData.twoWayRangingMeasure();
   for (int j = 0; j < rangingData.available(); j++) {
-    if (twr[j].status != 0 || twr[j].distance == 0xFFFF) {
+    if (!COEX_SEND_ALL && (twr[j].status != 0 || twr[j].distance == 0xFFFF)) {
       continue;
     }
     char line[UWBCOEX_UDP_MAX_PAYLOAD];
     uint32_t const seq = g_seq;
     g_seq = seq + 1;
     int n = snprintf(line, sizeof(line),
-                     "{\"type\":\"r\",\"seq\":%lu,\"t\":%lu,\"mac\":\"%02X%02X\",\"d\":%u}\n",
+                     "{\"type\":\"r\",\"seq\":%lu,\"t\":%lu,\"mac\":\"%02X%02X\",\"d\":%u,\"st\":%u}\n",
                      (unsigned long)seq, (unsigned long)millis(),
-                     twr[j].peer_addr[1], twr[j].peer_addr[0], (unsigned)twr[j].distance);
+                     twr[j].peer_addr[1], twr[j].peer_addr[0], (unsigned)twr[j].distance,
+                     (unsigned)twr[j].status);
     // never block the UWB callback: drop (and count) if the queue is full
     if (n <= 0 || !UWBWiFiCoex.sendUdp(kServer, kPort, (const uint8_t*)line, (size_t)n)) {
       g_enqueueFail = g_enqueueFail + 1;
@@ -130,15 +144,18 @@ void loop() {
     UWBWiFiCoexStats const s = UWBWiFiCoex.stats();
     char line[UWBCOEX_UDP_MAX_PAYLOAD];
     int n = snprintf(line, sizeof(line),
-                     "{\"type\":\"s\",\"seq\":%lu,\"t\":%lu,\"acq\":%lu,\"defer\":%lu,"
+                     "{\"type\":\"s\",\"seq\":%lu,\"t\":%lu,\"cb\":%lu,\"acq\":%lu,\"defer\":%lu,"
                      "\"tmo\":%lu,\"drop\":%lu,\"heap\":%u}\n",
-                     (unsigned long)g_seq, (unsigned long)millis(),
+                     (unsigned long)g_seq, (unsigned long)millis(), (unsigned long)g_uwbCallbacks,
                      (unsigned long)s.espBusAcquired, (unsigned long)s.espBusDeferrals,
                      (unsigned long)s.espBusTimeouts, (unsigned long)g_enqueueFail,
                      (unsigned)s.freeHeapMin);
     if (n > 0) {
       UWBWiFiCoex.sendUdp(kServer, kPort, (const uint8_t*)line, (size_t)n);
     }
+    // UWB health without a tag: ranging notifications per 5 s (~25 at 200 ms)
+    Serial.print("[uwb] cb=");
+    Serial.println(g_uwbCallbacks);
     UWBWiFiCoex.printStats(Serial);
     digitalWrite(LEDR, !digitalRead(LEDR));
   }
