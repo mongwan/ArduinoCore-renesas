@@ -160,6 +160,12 @@ int lwipUDP::endPacket()
         return 0;
     }
 
+    /* udp_sendto() does not take ownership of the pbuf: release our
+       reference, otherwise every packet leaks one pbuf and sending stops
+       once the pool is exhausted (~110 packets on the C33). */
+    __disable_irq();
+    pbuf_free(_data);
+    __enable_irq();
     _data = NULL;
 
     CLwipIf::getInstance().lwip_task();
