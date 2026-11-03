@@ -61,8 +61,13 @@ void setup() {
   UWB.begin();
   while (UWB.state() != 0) delay(10);
 
+  // Order matters (verified on hardware): give the constructor a local
+  // address, then re-register PEER_ADDRESS from a static copy. Passing the
+  // static object to the constructor made the session start fail on a Mac
+  // build ("could not set app params: 2", reason 0x35); cause not known yet.
+  UWBMacAddress dstAddr(UWBMacAddress::Size::SHORT, anchorAddr);
   static UWBMacAddress peerKeep(UWBMacAddress::Size::SHORT, anchorAddr);
-  static UWBRangingControlee session(0x11223344, srcAddr, peerKeep);
+  static UWBRangingControlee session(0x11223344, srcAddr, dstAddr);
   session.appParams.destinationMacAddr(peerKeep);  // dangling-pointer workaround
   UWBSessionManager.addSession(session);
   session.init();
