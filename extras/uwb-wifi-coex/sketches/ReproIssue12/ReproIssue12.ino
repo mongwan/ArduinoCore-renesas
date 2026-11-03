@@ -66,8 +66,9 @@ void setup() {
   UWB.begin();
   while (UWB.state() != 0) delay(10);
 #if ANCHOR_ONE_TO_ONE
+  UWBMacAddress peerArg(UWBMacAddress::Size::SHORT, dst1);
   static UWBMacAddress peerKeep(UWBMacAddress::Size::SHORT, dst1);
-  static UWBRangingController session(0x11223344, srcAddr, peerKeep);
+  static UWBRangingController session(0x11223344, srcAddr, peerArg);
   session.appParams.destinationMacAddr(peerKeep);  // dangling-pointer workaround
 #else
   static UWBRangingOneToMany session(0x11223344, srcAddr, dest);

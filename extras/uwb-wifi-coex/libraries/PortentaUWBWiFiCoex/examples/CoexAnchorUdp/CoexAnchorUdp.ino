@@ -64,6 +64,8 @@ void setup() {
   for (uint32_t t0 = millis(); !Serial && millis() - t0 < 3000;) {
     delay(10);
   }
+  // where did the previous run stop? (assert / HardFault / watchdog)
+  UWBWiFiCoex.printBootReport(Serial);
   pinMode(LEDR, OUTPUT);
   digitalWrite(LEDR, LOW);
 
@@ -100,9 +102,12 @@ void setup() {
   }
 
 #if ANCHOR_ONE_TO_ONE
+  // Order verified on hardware: local address to the constructor, then
+  // re-register PEER_ADDRESS from a static copy (dangling-pointer workaround).
+  UWBMacAddress peerArg(UWBMacAddress::Size::SHORT, dst1);
   static UWBMacAddress peerKeep(UWBMacAddress::Size::SHORT, dst1);
-  static UWBRangingController session(0x11223344, srcAddr, peerKeep);
-  session.appParams.destinationMacAddr(peerKeep);  // dangling-pointer workaround
+  static UWBRangingController session(0x11223344, srcAddr, peerArg);
+  session.appParams.destinationMacAddr(peerKeep);
 #else
   static UWBRangingOneToMany session(0x11223344, srcAddr, dest);
 #endif
@@ -110,10 +115,15 @@ void setup() {
   session.init();
   session.start();
   Serial.println("Ranging started");
+
+  // From here a stuck loop() resets the board after 2 s, and an assert or a
+  // HardFault resets it at once; the next boot prints where it happened.
+  UWBWiFiCoex.startWatchdog(2000);
 }
 
 void loop() {
   // loop() shares priority 4 with the UWB main task: always block here.
+  UWBWiFiCoex.loopTick();  // feeds the watchdog
   static uint32_t last = 0;
   if (millis() - last >= 5000) {
     last = millis();

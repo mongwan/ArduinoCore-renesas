@@ -72,7 +72,19 @@ public:
   UWBWiFiCoexStats stats() const;
   void printStats(Print& out) const;
 
+  /* Diagnostics (coex_diag.cpp). Call printBootReport() first thing in
+     setup(): it shows where the previous run stopped (last checkpoint,
+     assert location or HardFault PC/LR, watchdog reset flag).
+     startWatchdog() at the end of setup() arms the watchdog (max ~2600 ms)
+     and makes asserts/HardFaults reset the board; call loopTick() on every
+     loop() pass to feed it. */
+  static void printBootReport(Print& out);
+  static bool startWatchdog(uint32_t timeout_ms = 2000);
+  static void loopTick();
+  static void captureBootTraceOnce();  /* internal, runs at boot */
+
 private:
+  static void captureBootTrace();
   static void netTask(void* arg);
   bool _running = false;
 };

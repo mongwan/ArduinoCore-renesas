@@ -15,6 +15,7 @@
 #include <WiFiC3.h>
 #include "CNetIf.h"
 #include "EspSpiDriver.h"
+#include "coex_diag.h"
 
 namespace {
 
@@ -69,7 +70,9 @@ extern "C" void lwipwrap_lock(void) {
     s_lockDepth = s_lockDepth + 1;
     return;
   }
+  coex_cp(CP_LOCK_WAIT);
   xSemaphoreTake(s_lockSem, portMAX_DELAY);
+  coex_cp(CP_LOCK_TAKEN);
   s_lockOwner = me;
   s_lockDepth = 1;
 }
@@ -85,6 +88,7 @@ extern "C" void lwipwrap_unlock(void) {
   s_lockDepth = s_lockDepth - 1;
   if (s_lockDepth == 0) {
     s_lockOwner = nullptr;
+    coex_cp(CP_UNLOCK);
     xSemaphoreGive(s_lockSem);
   }
 }
@@ -93,6 +97,7 @@ extern "C" void lwipwrap_poll_yield(void) {
   /* wrapper polling loops (DNS, DHCP, ping, TCP connect/write) would spin at
      the caller's priority; DHCP even waits for the net task to progress */
   if (rtosContext()) {
+    coex_cp(CP_POLL_YIELD);
     vTaskDelay(1);
   }
 }
@@ -109,6 +114,7 @@ extern "C" bool esphost_spi_bus_acquire(void) {
     return true;
   }
 
+  coex_cp(CP_ACQ_ENTER);
   uint32_t const start = millis();
   for (;;) {
     vTaskSuspendAll();
@@ -117,6 +123,7 @@ extern "C" bool esphost_spi_bus_acquire(void) {
        CS now means no UWB transfer is in progress and none can start. */
     if (shieldCsIdle()) {
       s_busSuspended = true;
+      coex_cp(CP_ACQ_OK);
       s_busAcquireUs = micros();
       s_stats.espBusAcquired = s_stats.espBusAcquired + 1;
       uint32_t const waited = millis() - start;
@@ -127,8 +134,10 @@ extern "C" bool esphost_spi_bus_acquire(void) {
     }
     (void)xTaskResumeAll();
     s_stats.espBusDeferrals = s_stats.espBusDeferrals + 1;
+    coex_cp(CP_ACQ_DEFER);
     if ((millis() - start) >= s_cfg.busWaitTimeoutMs) {
       s_stats.espBusTimeouts = s_stats.espBusTimeouts + 1;
+      coex_cp(CP_ACQ_TIMEOUT);
       return false;
     }
     /* let the (lower priority) UWB task finish its transfer */
@@ -145,6 +154,7 @@ extern "C" void esphost_spi_bus_release(void) {
     s_stats.maxBusHoldUs = held;
   }
   s_busSuspended = false;
+  coex_cp(CP_RELEASE);
   (void)xTaskResumeAll();
 }
 
@@ -154,6 +164,7 @@ extern "C" void esphost_spi_handshake_wait(void) {
      tasks for up to 500 ms. */
   static uint8_t spins = 0;
   R_BSP_SoftwareDelay(100, BSP_DELAY_UNITS_MICROSECONDS);
+  coex_cp(CP_HS_WAIT);
   if (rtosContext() && ++spins >= 10) {
     spins = 0;
     vTaskDelay(1);
@@ -164,6 +175,7 @@ extern "C" void esphost_wait_1ms(void) {
   /* CEspControl::wait_for_answer() polls every 1 ms for up to timeout_ms
      (50 s for some requests). Busy-waiting there at priority 4 (loop) would
      stop the UWB tasks during a reconnect or an RSSI query. */
+  coex_cp(CP_WAIT_1MS);
   if (rtosContext()) {
     vTaskDelay(1);
   } else {
@@ -180,15 +192,21 @@ void UWBWiFiCoex_::netTask(void*) {
   for (;;) {
     uint32_t const t0 = micros();
 
+    coex_cp(CP_NET_LWIP);
     CLwipIf::getInstance().lwip_task();
+    coex_cp(CP_NET_LWIP_DONE);
 
     while (xQueueReceive(s_udpQueue, &msg, 0) == pdTRUE) {
       bool ok;
       {
         UWBWiFiCoexLock lock;
+        coex_cp(CP_NET_UDP_BEGIN);
         ok = s_udp->beginPacket(IPAddress(msg.ip), msg.port) == 1;
+        coex_cp(CP_NET_UDP_WRITE);
         ok = ok && s_udp->write(msg.data, msg.len) == msg.len;
+        coex_cp(CP_NET_UDP_END);
         ok = ok && s_udp->endPacket() == 1;
+        coex_cp(CP_NET_UDP_DONE);
       }
       if (ok) {
         s_stats.udpSent = s_stats.udpSent + 1;
@@ -203,6 +221,7 @@ void UWBWiFiCoex_::netTask(void*) {
     }
     s_stats.netLoops = s_stats.netLoops + 1;
 
+    coex_cp(CP_NET_SLEEP);
     vTaskDelayUntil(&last, pdMS_TO_TICKS(s_cfg.netPeriodMs));
     /* do not try to catch up after a long stall */
     TickType_t const now = xTaskGetTickCount();
@@ -255,11 +274,13 @@ bool UWBWiFiCoex_::begin(const UWBWiFiCoexConfig& cfg) {
     return false;
   }
 
+  coex_diag_set_net_task(s_netTask);
   _running = true;
   return true;
 }
 
 bool UWBWiFiCoex_::sendUdp(const IPAddress& ip, uint16_t port, const uint8_t* data, size_t len) {
+  coex_cp(CP_SEND_UDP);
   if (!_running || len > UWBCOEX_UDP_MAX_PAYLOAD) {
     s_stats.udpDropped = s_stats.udpDropped + 1;
     return false;
