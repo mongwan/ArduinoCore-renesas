@@ -13,6 +13,21 @@
 #include <WiFiC3.h>
 #include "arduino_secrets.h"
 
+/*
+ * ANCHOR_ONE_TO_ONE = 1 (default): UWBRangingController with one peer (0x2222).
+ *   Verified on hardware with the CoexTag sketch on the other board.
+ * ANCHOR_ONE_TO_ONE = 0: UWBRangingOneToMany with peers 0x2222 and 0x3333.
+ *   Not working yet with a Controlee tag (all measurements status 0x21).
+ *
+ * PortentaUWBShield 1.0.2 bug: UWBRangingController/UWBRangingControlee keep
+ * a pointer to the dstAddr copy their constructor received, so PEER_ADDRESS
+ * is read from a dead stack frame at init(). The address is re-registered
+ * below from a static object.
+ */
+#ifndef ANCHOR_ONE_TO_ONE
+#define ANCHOR_ONE_TO_ONE 1
+#endif
+
 static const IPAddress kServer(SERVER_IP);
 static const uint16_t kPort = SERVER_PORT;
 static WiFiUDP udp;
@@ -50,7 +65,13 @@ void setup() {
   UWB.registerRangingCallback(rangingHandler);
   UWB.begin();
   while (UWB.state() != 0) delay(10);
+#if ANCHOR_ONE_TO_ONE
+  static UWBMacAddress peerKeep(UWBMacAddress::Size::SHORT, dst1);
+  static UWBRangingController session(0x11223344, srcAddr, peerKeep);
+  session.appParams.destinationMacAddr(peerKeep);  // dangling-pointer workaround
+#else
   static UWBRangingOneToMany session(0x11223344, srcAddr, dest);
+#endif
   UWBSessionManager.addSession(session);
   session.init();
   session.start();

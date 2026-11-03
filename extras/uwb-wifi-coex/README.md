@@ -88,7 +88,7 @@ ARM GCC 13.2(Ubuntu 패키지)로 빌드했다. 공식 IDE는 GCC 7-2017q4를 �
 ## 검증하지 못한 것
 
 - 실제 보드에서의 동작 전부. 특히 ESP32-C3가 `SPI1` 폴링 전송(16.7 MHz 예상, 1600 B)과 바뀐 타이밍을 그대로 받아들이는지.
-- UWB 태그 측 예제(`UWB_RangingControlee`)가 `UWBRangingOneToMany` 앵커와 그대로 짝이 되는지.
+- 1:N(`UWBRangingOneToMany`) 앵커와 Controlee 태그의 측거. 1:1은 `CoexTag` 우회로 측거가 되는 것을 맥에서 확인했다(2026-11-03).
 - 공식 GCC 7-2017q4 빌드. IDE에서 한 번 빌드해 경고·오류가 없는지 확인해야 한다.
 
 ## 계획서 대비 바뀐 점

@@ -111,7 +111,10 @@ class Library:
             if util.is_dir():
                 files += [f for f in util.iterdir() if f.suffix in SRC_EXT]
         # skip examples/extras that may sit under src in some libraries
-        return sorted(f for f in files if "examples" not in f.parts and "extras" not in f.parts)
+        def skipped(f):
+            rel = f.relative_to(self.root).parts
+            return "examples" in rel or "extras" in rel
+        return sorted(f for f in files if not skipped(f))
 
     def include_dirs(self):
         dirs = [self.src]

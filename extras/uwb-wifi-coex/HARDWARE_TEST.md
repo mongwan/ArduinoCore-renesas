@@ -14,8 +14,13 @@
 python3 tools/udp_rx_stats.py --port 9000 --duration 600 --csv run.csv
 ```
 
-태그 보드 2대에는 PortentaUWBShield의 `UWB_RangingControlee` 예제를 올린다.
-주소를 `devAddr = {0x22,0x22}`, `{0x33,0x33}`으로 한 대씩 바꾸고, `destination`은 둘 다 `{0x11,0x11}`이다.
+태그 보드에는 `sketches/CoexTag`를 올린다(주소 0x2222). 공식 `UWB_RangingControlee` 예제는 쓰지 않는다.
+PortentaUWBShield 1.0.2의 `UWBRangingController`·`UWBRangingControlee`는 상대 주소(PEER_ADDRESS)를 사라진 스택 메모리에서 읽는 버그가 있어,
+세션 시작이 거부되거나(reason 0x8D, 0x35 등) 상대가 응답하지 않는다(status 0x21). `CoexTag`는 이 버그를 우회한다(`analysis/upstream_issue_peer_address.md`).
+
+앵커 스케치(`CoexAnchorUdp`, `ReproIssue12`)는 기본이 1:1 모드(`ANCHOR_ONE_TO_ONE 1`, 상대 0x2222)다.
+1:N 모드(`ANCHOR_ONE_TO_ONE 0`, 상대 0x2222·0x3333)는 아직 Controlee 태그와 측거가 되지 않는다(2026-11-03, 맥에서 확인).
+측거 확인의 판정은 앵커 쪽 `seq` 증가(또는 `CoexTag`의 `ok=` 증가)로 한다.
 
 ## G1 – 원인 확정 (원본 코어)
 
