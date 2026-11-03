@@ -1,0 +1,38 @@
+From f649cf43d872ad6400c4a1a1cd63970a0cd1399b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=EC=9C=A0=ED=98=84=EC=84=9D?= <evermongwan@gmail.com>
+Date: Tue, 3 Nov 2026 15:35:38 +0000
+Subject: [PATCH] lwipUDP: free the pbuf after a successful udp_sendto()
+
+udp_sendto() does not take ownership of the pbuf. endPacket() dropped its
+pointer on success without pbuf_free(), so every sent datagram leaked one
+pbuf and UDP sending stopped once the pool was exhausted (seen on a
+Portenta C33 after ~110 packets while Wi-Fi still reported connected).
+
+Found during hardware testing of the UWB + Wi-Fi coexistence work.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01A3m3TFiwD564ej3SMfu7jv
+---
+ libraries/lwIpWrapper/src/lwipUDP.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/libraries/lwIpWrapper/src/lwipUDP.cpp b/libraries/lwIpWrapper/src/lwipUDP.cpp
+index 22f615d..ff1fa79 100644
+--- a/libraries/lwIpWrapper/src/lwipUDP.cpp
++++ b/libraries/lwIpWrapper/src/lwipUDP.cpp
+@@ -160,6 +160,12 @@ int lwipUDP::endPacket()
+         return 0;
+     }
+ 
++    /* udp_sendto() does not take ownership of the pbuf: release our
++       reference, otherwise every packet leaks one pbuf and sending stops
++       once the pool is exhausted (~110 packets on the C33). */
++    __disable_irq();
++    pbuf_free(_data);
++    __enable_irq();
+     _data = NULL;
+ 
+     CLwipIf::getInstance().lwip_task();
+-- 
+2.43.0
+
