@@ -45,6 +45,37 @@ using CbkFuncRx_f = void(*)();
 #define ESP_HOSTED_SPI_TX_RX_ABORTED          6
 #define ESP_HOSTED_SPI_TIMEOUT                7
 #define ESP_HOSTED_MSG_PREPARATION_ERROR      9
+#define ESP_HOSTED_SPI_BUS_BUSY               10  /* SPI1 held by another device */
+
+/* Use the shared ArduinoSPI SPI1 object instead of a private FSP instance on
+   the same hardware channel. Required when SPI1 is shared (UWB Shield). */
+#ifndef ESPHOST_USE_ARDUINO_SPI
+#define ESPHOST_USE_ARDUINO_SPI 1
+#endif
+
+#ifndef ESP_HANDSHAKE_TIMEOUT_MS
+#define ESP_HANDSHAKE_TIMEOUT_MS 500
+#endif
+
+/* SPI1 arbitration hooks (weak, no-op by default).
+   - esphost_spi_bus_acquire(): called right before ESP_CS goes LOW. Return
+     false if the bus cannot be taken; the transaction is then skipped and
+     esp_host_spi_transaction() reports ESP_HOSTED_SPI_BUS_BUSY.
+     When it returns true, nothing may block until esphost_spi_bus_release().
+   - esphost_spi_handshake_wait(): called between HANDSHAKE polls.
+   - esphost_wait_1ms(): called between control-response polls. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool esphost_spi_bus_acquire(void);
+void esphost_spi_bus_release(void);
+void esphost_spi_handshake_wait(void);
+/* ~1 ms pause between polls while waiting for a control response
+   (CEspControl::wait_for_answer). Default: R_BSP_SoftwareDelay(1 ms). */
+void esphost_wait_1ms(void);
+#ifdef __cplusplus
+}
+#endif
 
 /* init the SPI driver */
 int esp_host_spi_init(void);

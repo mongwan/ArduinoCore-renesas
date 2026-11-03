@@ -314,7 +314,9 @@ int CEspControl::wait_for_answer(CCtrlMsgWrapper* response) {
          break;
       }
 
-      R_BSP_SoftwareDelay(1000, BSP_DELAY_UNITS_MICROSECONDS);
+      /* 1 ms between polls; an RTOS-aware build yields here instead of
+         busy-waiting (see esphost_wait_1ms() in EspSpiDriver.h) */
+      esphost_wait_1ms();
       time_num++;
    } while(time_num < timeout_ms);
 

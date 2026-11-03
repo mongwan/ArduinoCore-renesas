@@ -17,6 +17,7 @@ lwipServer::lwipServer(uint16_t port)
 
 void lwipServer::begin()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     if (_tcp_server.pcb != NULL) {
         return;
     }
@@ -42,12 +43,14 @@ void lwipServer::begin()
 
 void lwipServer::begin(uint16_t port)
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     _port = port;
     begin();
 }
 
 void lwipServer::accept()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     /* Free client if disconnected */
     for (int n = 0; n < MAX_CLIENT; n++) {
         if (_tcp_client[n] != NULL) {
@@ -62,6 +65,7 @@ void lwipServer::accept()
 
 lwipClient lwipServer::available()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     accept();
 
     for (int n = 0; n < MAX_CLIENT; n++) {
@@ -84,11 +88,13 @@ lwipClient lwipServer::available()
 
 size_t lwipServer::write(uint8_t b)
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     return write(&b, 1);
 }
 
 size_t lwipServer::write(const uint8_t* buffer, size_t size)
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     size_t n = 0;
 
     accept();

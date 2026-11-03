@@ -118,7 +118,10 @@ FSP_HEADER
 #endif
 #ifndef configTOTAL_HEAP_SIZE
 # if defined(ARDUINO_PORTENTA_C33)
-#   define configTOTAL_HEAP_SIZE (0x8000)
+    /* 48 KB (was 32 KB). UWB Shield tasks alone need ~16 KB of stacks
+       (6000 + 4096 + 4096 + 1200 bytes) plus queues; the sketch thread takes
+       4 KB and PortentaUWBWiFiCoex adds ~5.5 KB. The C33 has 512 KB SRAM. */
+#   define configTOTAL_HEAP_SIZE (0xC000)
 # elif (defined(ARDUINO_MINIMA) || defined(ARDUINO_UNOWIFIR4)) || defined(ARDUINO_NANO_R4)
 #   define configTOTAL_HEAP_SIZE (0x2000) /* R7FA4M1AB has 32 kByte RAM total, so we only allocate 8 kByte RAM for FreeRTOS heap. */
 # else

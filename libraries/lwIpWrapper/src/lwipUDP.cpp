@@ -51,6 +51,7 @@ lwipUDP::lwipUDP() { }
 /* Start lwipUDP socket, listening at local IP ip and port PORT */
 uint8_t lwipUDP::begin(IPAddress ip, uint16_t port, bool multicast)
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     // Can create a single udp connection per socket
     if (_udp.pcb != NULL) {
         return 0;
@@ -95,12 +96,14 @@ uint8_t lwipUDP::begin(IPAddress ip, uint16_t port, bool multicast)
    will return zero if parsePacket hasn't been called yet */
 int lwipUDP::available()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     return _remaining;
 }
 
 /* Release any resources being used by this lwipUDP instance */
 void lwipUDP::stop()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     if (_udp.pcb != NULL) {
         udp_disconnect(_udp.pcb);
         udp_remove(_udp.pcb);
@@ -112,6 +115,7 @@ void lwipUDP::stop()
 
 int lwipUDP::beginPacket(const char* host, uint16_t port)
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     // Look up the host first
     int ret = 0;
     // DNSClient dns;
@@ -127,6 +131,7 @@ int lwipUDP::beginPacket(const char* host, uint16_t port)
 
 int lwipUDP::beginPacket(IPAddress ip, uint16_t port)
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     if (_udp.pcb == NULL) {
         return 0;
     }
@@ -142,6 +147,7 @@ int lwipUDP::beginPacket(IPAddress ip, uint16_t port)
 
 int lwipUDP::endPacket()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     if ((_udp.pcb == NULL) || (_data == NULL)) {
         return 0;
     }
@@ -163,11 +169,13 @@ int lwipUDP::endPacket()
 
 size_t lwipUDP::write(uint8_t byte)
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     return write(&byte, 1);
 }
 
 size_t lwipUDP::write(const uint8_t* buffer, size_t size)
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     __disable_irq();
     _data = pbuffer_put_data(_data, buffer, size);
     __enable_irq();
@@ -180,6 +188,7 @@ size_t lwipUDP::write(const uint8_t* buffer, size_t size)
 
 int lwipUDP::parsePacket()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     // discard any remaining bytes in the last packet
     // while (_remaining) {
     //   // could this fail (loop endlessly) if _remaining > 0 and recv in read fails?
@@ -203,6 +212,7 @@ int lwipUDP::parsePacket()
 
 int lwipUDP::read()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     uint8_t byte;
 
     if (_udp.data.p == NULL) {
@@ -221,6 +231,7 @@ int lwipUDP::read()
 
 int lwipUDP::read(unsigned char* buffer, size_t len)
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     if (_udp.data.p == NULL) {
         return -1;
     }
@@ -253,6 +264,7 @@ int lwipUDP::read(unsigned char* buffer, size_t len)
 
 int lwipUDP::peek()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     uint8_t b;
     // Unlike recv, peek doesn't check to see if there's any data available, so we must.
     // If the user hasn't called parsePacket yet then return nothing otherwise they
@@ -266,18 +278,21 @@ int lwipUDP::peek()
 
 void lwipUDP::flush()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     // TODO: we should wait for TX buffer to be emptied
 }
 
 /* Start lwipUDP socket, listening at local port PORT */
 uint8_t lwipUDP::beginMulticast(IPAddress ip, uint16_t port)
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     return begin(ip, port, true);
 }
 
 #if LWIP_UDP
 void lwipUDP::onDataArrival(std::function<void()> onDataArrival_fn)
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     _udp.onDataArrival = onDataArrival_fn;
 }
 #endif

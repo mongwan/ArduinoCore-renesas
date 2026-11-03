@@ -33,6 +33,7 @@ lwipClient::lwipClient(struct tcp_struct* tcpClient)
 /* -------------------------------------------------------------------------- */
 int lwipClient::connect(const char* host, uint16_t port)
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     /* -------------------------------------------------------------------------- */
     IPAddress remote_addr;
 
@@ -47,6 +48,7 @@ int lwipClient::connect(const char* host, uint16_t port)
 /* -------------------------------------------------------------------------- */
 int lwipClient::connect(IPAddress ip, uint16_t port)
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     /* -------------------------------------------------------------------------- */
     if (_tcp_client == NULL) {
         /* Allocates memory for client */
@@ -79,6 +81,7 @@ int lwipClient::connect(IPAddress ip, uint16_t port)
     startTime = millis();
     while (_tcp_client->state == TCP_NONE) {
         CLwipIf::getInstance().lwip_task();
+        lwipwrap_poll_yield();
         if ((_tcp_client->state == TCP_CLOSING) || ((millis() - startTime) >= _timeout)) {
             stop();
             return 0;
@@ -91,6 +94,7 @@ int lwipClient::connect(IPAddress ip, uint16_t port)
 /* -------------------------------------------------------------------------- */
 size_t lwipClient::write(uint8_t b)
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     /* -------------------------------------------------------------------------- */
     return write(&b, 1);
 }
@@ -98,6 +102,7 @@ size_t lwipClient::write(uint8_t b)
 /* -------------------------------------------------------------------------- */
 size_t lwipClient::write(const uint8_t* buf, size_t size)
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     /* -------------------------------------------------------------------------- */
     if ((_tcp_client == NULL) || (_tcp_client->pcb == NULL) || (buf == NULL) || (size == 0)) {
         return 0;
@@ -135,6 +140,7 @@ size_t lwipClient::write(const uint8_t* buf, size_t size)
             return 0;
         }
         CLwipIf::getInstance().lwip_task();
+        lwipwrap_poll_yield();
 
     } while (bytes_sent != size);
 
@@ -144,6 +150,7 @@ size_t lwipClient::write(const uint8_t* buf, size_t size)
 /* -------------------------------------------------------------------------- */
 int lwipClient::available()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     /* -------------------------------------------------------------------------- */
     CLwipIf::getInstance().lwip_task();
     if (_tcp_client != NULL) {
@@ -155,6 +162,7 @@ int lwipClient::available()
 /* -------------------------------------------------------------------------- */
 int lwipClient::read()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     /* -------------------------------------------------------------------------- */
     uint8_t b;
     if ((_tcp_client != NULL) && (_tcp_client->data.p != NULL)) {
@@ -170,6 +178,7 @@ int lwipClient::read()
 /* -------------------------------------------------------------------------- */
 int lwipClient::read(uint8_t* buf, size_t size)
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     /* -------------------------------------------------------------------------- */
     if ((_tcp_client != NULL) && (_tcp_client->data.p != NULL)) {
         __disable_irq();
@@ -183,6 +192,7 @@ int lwipClient::read(uint8_t* buf, size_t size)
 /* -------------------------------------------------------------------------- */
 int lwipClient::peek()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     /* -------------------------------------------------------------------------- */
     uint8_t b;
     // Unlike recv, peek doesn't check to see if there's any data available, so we must
@@ -198,6 +208,7 @@ int lwipClient::peek()
 /* -------------------------------------------------------------------------- */
 void lwipClient::flush()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     /* -------------------------------------------------------------------------- */
     if ((_tcp_client == NULL) || (_tcp_client->pcb == NULL)) {
         return;
@@ -209,6 +220,7 @@ void lwipClient::flush()
 /* -------------------------------------------------------------------------- */
 void lwipClient::stop()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     /* -------------------------------------------------------------------------- */
     if (_tcp_client == NULL) {
         return;
@@ -223,6 +235,7 @@ void lwipClient::stop()
 /* -------------------------------------------------------------------------- */
 uint8_t lwipClient::connected()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     /* -------------------------------------------------------------------------- */
     uint8_t s = status();
     return ((available() && (s == TCP_CLOSING)) || (s == TCP_CONNECTED) || (s == TCP_ACCEPTED));
@@ -231,6 +244,7 @@ uint8_t lwipClient::connected()
 /* -------------------------------------------------------------------------- */
 uint8_t lwipClient::status()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     if (_tcp_client == NULL) {
         return TCP_NONE;
     }
@@ -260,6 +274,7 @@ returns always 0. */
 /* -------------------------------------------------------------------------- */
 uint8_t lwipClient::getSocketNumber()
 {
+    CLwipLock lock; /* coexistence: serialize lwIP access */
     /* -------------------------------------------------------------------------- */
     return 0;
 }

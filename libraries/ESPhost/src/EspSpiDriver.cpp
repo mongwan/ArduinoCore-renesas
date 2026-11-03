@@ -31,6 +31,26 @@
 #include "EspSpiDriver.h"
 #include "EspChipManager.h"
 
+#if ESPHOST_USE_ARDUINO_SPI
+#include <SPI.h>
+#include <string.h>
+
+/* ESP32-C3 SPI link: 24 MHz requested (same R_SPI_CalculateBitrate() input as
+   the original FSP configuration), CPOL = 1, CPHA = 0 (SPI_MODE2), MSB first */
+static const arduino::SPISettings esp_spi_settings(24000000, MSBFIRST, SPI_MODE2);
+#endif
+
+/* Default (no-op) bus arbitration hooks. A sketch or library that shares SPI1
+   with another device overrides them with strong definitions. */
+extern "C" __attribute__((weak)) bool esphost_spi_bus_acquire(void) { return true; }
+extern "C" __attribute__((weak)) void esphost_spi_bus_release(void) { }
+extern "C" __attribute__((weak)) void esphost_spi_handshake_wait(void) {
+   R_BSP_SoftwareDelay(100, BSP_DELAY_UNITS_MICROSECONDS);
+}
+extern "C" __attribute__((weak)) void esphost_wait_1ms(void) {
+   R_BSP_SoftwareDelay(1000, BSP_DELAY_UNITS_MICROSECONDS);
+}
+
 /* #####################
  * Configuration defines 
  * ##################### */
@@ -52,15 +72,15 @@
 static volatile unsigned int pi_msg_to_get_from_esp32 = 0;
 
 
-static volatile uint8_t esp32_spi_rx_buffer[MAX_SPI_BUFFER_SIZE];
-static volatile uint8_t esp32_spi_tx_buffer[MAX_SPI_BUFFER_SIZE];
+static volatile uint8_t __attribute__((aligned(4))) esp32_spi_rx_buffer[MAX_SPI_BUFFER_SIZE];
+static volatile uint8_t __attribute__((aligned(4))) esp32_spi_tx_buffer[MAX_SPI_BUFFER_SIZE];
 
-static spi_instance_ctrl_t  _esp_host_spi_ctrl;
-static spi_cfg_t            _esp_host_spi_cfg;
+static spi_instance_ctrl_t  _esp_host_spi_ctrl __attribute__((unused));
+static spi_cfg_t            _esp_host_spi_cfg __attribute__((unused));
 #ifdef USE_SCI_SPI_FSP_API
 static sci_spi_extended_cfg_t _sci_spi_ext_cfg;
 #else
-static spi_extended_cfg_t   _esp_host_spi_ext_cfg;
+static spi_extended_cfg_t   _esp_host_spi_ext_cfg __attribute__((unused));
 #endif
 
 static int spi_rx_waiting = 0;
@@ -99,7 +119,7 @@ static spi_event_t _spi_cb_status = SPI_EVENT_TRANSFER_ABORTED;
  * PRIVATE Functions declaration
  * ############################# */
 
-static void spi_callback(spi_callback_args_t *p_args);
+static void spi_callback(spi_callback_args_t *p_args) __attribute__((unused));
 
 
 /* execute SPI communication, send the content of tx_buffer to ESP32, put the
@@ -144,6 +164,13 @@ int esp_host_spi_init(void) {
     *  SPI
     * +++++ */
 
+#if ESPHOST_USE_ARDUINO_SPI
+   /* SPI1 (P100-P102) is shared with the UWB Shield: go through the
+      ArduinoSPI object so that there is a single owner of the SPI1
+      registers, no second FSP instance and no second IRQ registration. */
+   SPI1.begin();
+   spi_set_keep_open(&SPI1, true);
+#else
    /*  INIT SPI peripheral PINs */
    #ifdef USE_SCI_SPI_FSP_API
    R_IOPORT_PinCfg(&g_ioport_ctrl, ESP_MISO, (uint32_t) (IOPORT_CFG_PERIPHERAL_PIN | IOPORT_PERIPHERAL_SCI0_2_4_6_8));
@@ -241,6 +268,8 @@ int esp_host_spi_init(void) {
    #endif
       return ESP_HOSTED_SPI_DRIVER_SPI_FAIL_OPEN;
    }
+   
+#endif /* ESPHOST_USE_ARDUINO_SPI */
    
    CEspChipManager::getInstance().initialize();
    spi_driver_initialized = true;
@@ -399,6 +428,54 @@ int esp_host_send_and_receive(void) {
    /* VERIFY IF ESP32 is ready to accept a SPI transaction */
    bool esp_ready = false;
    bsp_io_level_t handshake;
+#if ESPHOST_USE_ARDUINO_SPI
+   (void)time_num;
+   /* Poll HANDSHAKE for up to ESP_HANDSHAKE_TIMEOUT_MS (the original loop was
+      5000 x 100 us). The wait hook lets an RTOS-aware build yield the CPU
+      instead of busy-waiting at the caller's priority. */
+   uint32_t const hs_start = millis();
+   do {
+      R_IOPORT_PinRead(NULL, HANDSHAKE, &handshake);
+      esp_ready = (handshake == BSP_IO_LEVEL_HIGH);
+      if(esp_ready) {
+         break;
+      }
+      esphost_spi_handshake_wait();
+   } while((millis() - hs_start) < ESP_HANDSHAKE_TIMEOUT_MS);
+
+   if(esp_ready) {
+      /* The bus is shared with other SPI1 users (e.g. the UWB Shield).
+         acquire() must not return true while another device is selected.
+         Everything up to release() is non-blocking. */
+      if(!esphost_spi_bus_acquire()) {
+         rv = ESP_HOSTED_SPI_BUS_BUSY;
+      }
+      else {
+         /* Remember what the other SPI1 user configured: it may have called
+            beginTransaction() already and be about to assert its own CS. */
+         arduino::SPISettings const prev_settings = SPI1.getSettings();
+         SPI1.beginTransaction(esp_spi_settings);
+
+         /* Put CS LOW */
+         R_IOPORT_PinWrite(NULL, ESP_CS, BSP_IO_LEVEL_LOW);
+         R_BSP_SoftwareDelay(100, BSP_DELAY_UNITS_MICROSECONDS);
+
+         /* ArduinoSPI::transfer(buf, len) is full duplex and in place */
+         memcpy((void *)esp32_spi_rx_buffer, (const void *)esp32_spi_tx_buffer, MAX_SPI_BUFFER_SIZE);
+         SPI1.transfer((void *)esp32_spi_rx_buffer, MAX_SPI_BUFFER_SIZE);
+
+         R_IOPORT_PinWrite(NULL, ESP_CS, BSP_IO_LEVEL_HIGH);
+         SPI1.beginTransaction(prev_settings);
+         esphost_spi_bus_release();
+
+         spi_transaction_in_progress = false;
+         rv = ESP_HOSTED_SPI_DRIVER_OK;
+      }
+   }
+   else {
+      rv = ESP_HOSTED_SPI_ESP_NOT_READY;
+   }
+#else
    do {
       R_IOPORT_PinRead(NULL, HANDSHAKE, &handshake);
       esp_ready = (handshake == BSP_IO_LEVEL_HIGH);
@@ -483,6 +560,8 @@ int esp_host_send_and_receive(void) {
    else {
       rv = ESP_HOSTED_SPI_ESP_NOT_READY;
    }
+
+#endif /* ESPHOST_USE_ARDUINO_SPI */
 
    /* in any case de-select ESP32 */
    R_IOPORT_PinWrite(NULL, ESP_CS, BSP_IO_LEVEL_HIGH);

@@ -88,6 +88,8 @@ CLwipIf::CLwipIf()
     , dns_num(-1)
     , willing_to_start_sync_req(false)
     , async_requests_ongoing(true)
+    , external_task_mode(false)
+    , sync_lock_depth(0)
 {
     /* -------------------------------------------------------------------------- */
     /* Initialize lwIP stack, singletone implementation guarantees that lwip is
@@ -129,6 +131,7 @@ CLwipIf::CLwipIf()
 void CLwipIf::lwip_task()
 {
     /* -------------------------------------------------------------------------- */
+    CLwipLock lock;
     if (CLwipIf::wifi_hw_initialized)
         CEspControl::getInstance().communicateWithEsp();
 
@@ -217,6 +220,7 @@ int CLwipIf::ping(IPAddress ip, uint8_t ttl)
 
     while (!requestCbkData.endMillis && (millis() - requestCbkData.startMillis) <= 5000) {
         CLwipIf::getInstance().lwip_task();
+        lwipwrap_poll_yield();
     }
 
     CLwipIf::getInstance().restartAsyncRequest();
@@ -888,6 +892,36 @@ int CLwipIf::resetLowPowerMode()
     return rv;
 }
 
+/* -------------------------------------------------------------------------- */
+void CLwipIf::setExternalTaskMode(bool enable)
+{
+    /* -------------------------------------------------------------------------- */
+    if (enable == external_task_mode) {
+        return;
+    }
+    if (enable) {
+        /* let the timer ISR finish its current lwip_task() and switch itself
+           off at a safe point (same handshake used by synchronous requests) */
+        startSyncRequest();
+#ifdef LWIP_USE_TIMER
+        timer.disable_overflow_irq();
+#endif
+        async_requests_ongoing = false;
+        external_task_mode = true;
+    } else {
+        external_task_mode = false;
+        async_requests_ongoing = true;
+#ifdef LWIP_USE_TIMER
+        timer.enable_overflow_irq();
+#endif
+    }
+}
+
+/* Default no-op lock (single context use, original behaviour) */
+extern "C" __attribute__((weak)) void lwipwrap_lock(void) { }
+extern "C" __attribute__((weak)) void lwipwrap_unlock(void) { }
+extern "C" __attribute__((weak)) void lwipwrap_poll_yield(void) { }
+
 #ifdef LWIP_USE_TIMER
 /* -------------------------------------------------------------------------- */
 void CLwipIf::timer_cb(timer_callback_args_t *arg) {
@@ -916,6 +950,7 @@ void CLwipIf::dns_callback(const char *name, const ip_addr_t *ipaddr, void *call
 int8_t CLwipIf::get_ip_address_from_hostname(const char* hostname, uint32_t* ipaddr)
 {
     /* -------------------------------------------------------------------------- */
+    CLwipLock lock;
     ip_addr_t iphost;
     err_t err;
     unsigned long dns_request_sent = 0;
@@ -934,6 +969,7 @@ int8_t CLwipIf::get_ip_address_from_hostname(const char* hostname, uint32_t* ipa
         dns_request_sent = millis();
         while (*ipaddr == 0) {
             lwip_task();
+            lwipwrap_poll_yield();
             if ((millis() - dns_request_sent) >= TIMEOUT_DNS_REQUEST) {
                 ret = -1;
                 break;
@@ -1247,6 +1283,8 @@ bool CNetIf::dhcp_request()
         if (!acquired && ((millis() - startTime) > dhcp_timeout)) {
             break;
         }
+        /* DHCP advances in lwip_task(): let the polling task run */
+        lwipwrap_poll_yield();
 
     } while (!acquired);
 
@@ -1259,7 +1297,11 @@ void CNetIf::dhcp_reset()
     /* -------------------------------------------------------------------------- */
     /* it resets the DHCP status to IDLE */
     while (dhcp_st != DHCP_IDLE_STATUS) {
-        task();
+        {
+            CLwipLock lock;
+            task();
+        }
+        lwipwrap_poll_yield();
     }
 }
 

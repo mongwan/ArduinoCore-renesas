@@ -77,6 +77,11 @@ public:
     virtual void beginTransaction(arduino::SPISettings settings);
     virtual void endTransaction(void) { }
 
+    /* Settings applied by the last beginTransaction(). Non-virtual on purpose:
+       precompiled users (e.g. libUWBShieldApi.a) keep the same vtable and
+       object layout. Used to restore the bus after a foreign transaction. */
+    arduino::SPISettings getSettings() const { return _settings; }
+
     // SPI Configuration methods
     virtual void attachInterrupt() { }
     virtual void detachInterrupt() { }
@@ -139,5 +144,11 @@ extern arduino::ArduinoSPI SPI;
 #endif
 extern arduino::ArduinoSPI SPI1;
 #endif
+
+/* Shared-bus support: while kept open, end() on this instance is ignored so
+   that one user (e.g. the UWB stack deinit) cannot close the bus under another
+   user (e.g. the ESP32 Wi-Fi link on SPI1). */
+void spi_set_keep_open(arduino::ArduinoSPI * spi, bool keep);
+bool spi_is_kept_open(arduino::ArduinoSPI const * spi);
 
 #endif

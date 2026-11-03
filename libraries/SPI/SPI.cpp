@@ -166,6 +166,9 @@ void ArduinoSPI::begin()
 
 void ArduinoSPI::end()
 {
+  if (spi_is_kept_open(this)) {
+    return;
+  }
   if (_is_sci) {
     _close(&_spi_sci_ctrl);
   } else {
@@ -300,6 +303,10 @@ void ArduinoSPI::beginTransaction(arduino::SPISettings settings)
   if (!_is_initialized)
     begin();
 
+  /* Register writes and the _settings update must not be split by a context
+     switch: another task sharing this bus restores getSettings() afterwards. */
+  uint32_t const primask = __get_PRIMASK();
+  __disable_irq();
   if (_settings != settings)
   {
     configSpiSettings(settings);
@@ -314,6 +321,7 @@ void ArduinoSPI::beginTransaction(arduino::SPISettings settings)
     }
     */
   }
+  __set_PRIMASK(primask);
 }
 
 /**************************************************************************************
@@ -576,3 +584,36 @@ ArduinoSPI SPI(PIN_SPI_MISO, PIN_SPI_MOSI, PIN_SPI_SCK, FORCE_SPI_MODE);
 #if SPI_HOWMANY > 1
 ArduinoSPI SPI1(PIN_SPI1_MISO, PIN_SPI1_MOSI, PIN_SPI1_SCK, FORCE_SPI1_MODE);
 #endif
+
+/**************************************************************************************
+ * SHARED BUS SUPPORT
+ **************************************************************************************/
+
+static arduino::ArduinoSPI * _spi_keep_open[2] = { nullptr, nullptr };
+
+void spi_set_keep_open(arduino::ArduinoSPI * spi, bool keep)
+{
+  size_t const n = sizeof(_spi_keep_open) / sizeof(_spi_keep_open[0]);
+  for (size_t i = 0; i < n; i++) {
+    if (_spi_keep_open[i] == spi) {
+      if (!keep) _spi_keep_open[i] = nullptr;
+      return;
+    }
+  }
+  if (!keep) return;
+  for (size_t i = 0; i < n; i++) {
+    if (_spi_keep_open[i] == nullptr) {
+      _spi_keep_open[i] = spi;
+      return;
+    }
+  }
+}
+
+bool spi_is_kept_open(arduino::ArduinoSPI const * spi)
+{
+  size_t const n = sizeof(_spi_keep_open) / sizeof(_spi_keep_open[0]);
+  for (size_t i = 0; i < n; i++) {
+    if (_spi_keep_open[i] == spi) return true;
+  }
+  return false;
+}

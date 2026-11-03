@@ -33,6 +33,33 @@
 #include "FspTimer.h"
 #endif
 
+/* ---------------------------------------------------------------------------
+ * Coexistence hooks (weak, no-op by default)
+ * lwipwrap_lock()/lwipwrap_unlock() must implement a RECURSIVE lock. They are
+ * called around lwip_task(), the socket wrappers and synchronous ESP requests.
+ * A strong implementation (e.g. the PortentaUWBWiFiCoex library) must turn
+ * them into no-ops when called from an ISR or before the scheduler runs.
+ * ------------------------------------------------------------------------- */
+#ifdef __cplusplus
+extern "C" {
+#endif
+void lwipwrap_lock(void);
+void lwipwrap_unlock(void);
+/* called inside wrapper polling loops (DNS, ping, DHCP, TCP connect/write)
+   so that an RTOS build can yield; default: no-op */
+void lwipwrap_poll_yield(void);
+#ifdef __cplusplus
+}
+
+class CLwipLock {
+public:
+    CLwipLock() { lwipwrap_lock(); }
+    ~CLwipLock() { lwipwrap_unlock(); }
+    CLwipLock(CLwipLock const&) = delete;
+    CLwipLock& operator=(CLwipLock const&) = delete;
+};
+#endif
+
 #define MAX_SOFAT_CONNECTION_DEF 5
 #define NETWORK_INTERFACES_MAX_NUM 3
 #define MAX_HOSTNAME_DIM 253
@@ -325,6 +352,9 @@ private:
     int dns_num;
     bool willing_to_start_sync_req;
     bool async_requests_ongoing;
+    /* true: lwip_task() is driven by an RTOS task, the timer IRQ is off */
+    volatile bool external_task_mode;
+    int sync_lock_depth;
 
     friend CWifiStation;
     friend CWifiSoftAp;
@@ -368,6 +398,12 @@ public:
 
     void startSyncRequest()
     {
+        if (external_task_mode) {
+            /* the polling task cannot run lwip_task() while we hold the lock */
+            lwipwrap_lock();
+            sync_lock_depth++;
+            return;
+        }
         if (async_requests_ongoing) {
             synchronized
             {
@@ -381,6 +417,13 @@ public:
 
     void restartAsyncRequest()
     {
+        if (external_task_mode) {
+            if (sync_lock_depth > 0) {
+                sync_lock_depth--;
+                lwipwrap_unlock();
+            }
+            return;
+        }
         async_requests_ongoing = true;
         delay(10);
         timer.enable_overflow_irq();
@@ -442,6 +485,13 @@ public:
     int setWifiMode(WifiMode_t mode);
 
     void lwip_task();
+
+    /* Coexistence mode. enable=true stops the 100 Hz timer IRQ that runs
+       lwip_task() (and the ESP32 SPI traffic) from interrupt context; the
+       caller must then call lwip_task() periodically from a task.
+       enable=false restores the timer IRQ. */
+    void setExternalTaskMode(bool enable);
+    bool isExternalTaskMode() const { return external_task_mode; }
     /*
      * PING
      */
