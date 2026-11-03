@@ -1,0 +1,847 @@
+From f956523edce14840a651c8533311a5acdf53e3a4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=EC=9C=A0=ED=98=84=EC=84=9D?= <evermongwan@gmail.com>
+Date: Tue, 3 Nov 2026 05:44:01 +0000
+Subject: [PATCH] Portenta C33: let the UWB Shield and Wi-Fi share SPI1
+
+The ESP32-C3 Wi-Fi link and the UWB Shield both sit on SPI1 (P100-P102).
+ESPhost opened its own FSP instance of the same channel and lwIpWrapper
+ran lwip_task() (and the ESP SPI traffic) from a 100 Hz timer interrupt,
+so ESP transfers could land in the middle of a UWB transfer.
+
+- ESPhost: talk to the ESP32 through the shared SPI1 ArduinoSPI object
+  (ESPHOST_USE_ARDUINO_SPI, default on), restore the previous SPISettings
+  after each transfer, add weak bus/handshake/control-wait hooks.
+- SPI: add getSettings(), make beginTransaction() atomic, add
+  spi_set_keep_open() so a user's end() cannot close a shared bus.
+  Object layout and vtable unchanged (libUWBShieldApi.a is precompiled).
+- lwIpWrapper: weak recursive-lock hooks around lwip_task(), the socket
+  wrappers and sync requests; setExternalTaskMode() to drive lwip_task()
+  from an RTOS task instead of the timer IRQ; poll-yield hook in DNS,
+  DHCP, ping and TCP wait loops.
+- Arduino_FreeRTOS: 48 KB heap on the C33 (UWB stack + coexistence task).
+
+All hooks are no-ops by default; behaviour without a coexistence layer is
+unchanged apart from ESPhost using SPI1.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01A3m3TFiwD564ej3SMfu7jv
+---
+ .../Arduino_FreeRTOS/src/FreeRTOSConfig.h     |  5 +-
+ libraries/ESPhost/src/CEspControl.cpp         |  4 +-
+ libraries/ESPhost/src/EspSpiDriver.cpp        | 91 +++++++++++++++++--
+ libraries/ESPhost/src/EspSpiDriver.h          | 31 +++++++
+ libraries/SPI/SPI.cpp                         | 41 +++++++++
+ libraries/SPI/SPI.h                           | 11 +++
+ libraries/lwIpWrapper/src/CNetIf.cpp          | 44 ++++++++-
+ libraries/lwIpWrapper/src/CNetIf.h            | 50 ++++++++++
+ libraries/lwIpWrapper/src/lwipClient.cpp      | 15 +++
+ libraries/lwIpWrapper/src/lwipServer.cpp      |  6 ++
+ libraries/lwIpWrapper/src/lwipUDP.cpp         | 15 +++
+ 11 files changed, 304 insertions(+), 9 deletions(-)
+
+diff --git a/libraries/Arduino_FreeRTOS/src/FreeRTOSConfig.h b/libraries/Arduino_FreeRTOS/src/FreeRTOSConfig.h
+index 9576cd9..5f8b5ee 100644
+--- a/libraries/Arduino_FreeRTOS/src/FreeRTOSConfig.h
++++ b/libraries/Arduino_FreeRTOS/src/FreeRTOSConfig.h
+@@ -118,7 +118,10 @@ FSP_HEADER
+ #endif
+ #ifndef configTOTAL_HEAP_SIZE
+ # if defined(ARDUINO_PORTENTA_C33)
+-#   define configTOTAL_HEAP_SIZE (0x8000)
++    /* 48 KB (was 32 KB). UWB Shield tasks alone need ~16 KB of stacks
++       (6000 + 4096 + 4096 + 1200 bytes) plus queues; the sketch thread takes
++       4 KB and PortentaUWBWiFiCoex adds ~5.5 KB. The C33 has 512 KB SRAM. */
++#   define configTOTAL_HEAP_SIZE (0xC000)
+ # elif (defined(ARDUINO_MINIMA) || defined(ARDUINO_UNOWIFIR4)) || defined(ARDUINO_NANO_R4)
+ #   define configTOTAL_HEAP_SIZE (0x2000) /* R7FA4M1AB has 32 kByte RAM total, so we only allocate 8 kByte RAM for FreeRTOS heap. */
+ # else
+diff --git a/libraries/ESPhost/src/CEspControl.cpp b/libraries/ESPhost/src/CEspControl.cpp
+index af1afdd..5dc3a35 100644
+--- a/libraries/ESPhost/src/CEspControl.cpp
++++ b/libraries/ESPhost/src/CEspControl.cpp
+@@ -314,7 +314,9 @@ int CEspControl::wait_for_answer(CCtrlMsgWrapper* response) {
+          break;
+       }
+ 
+-      R_BSP_SoftwareDelay(1000, BSP_DELAY_UNITS_MICROSECONDS);
++      /* 1 ms between polls; an RTOS-aware build yields here instead of
++         busy-waiting (see esphost_wait_1ms() in EspSpiDriver.h) */
++      esphost_wait_1ms();
+       time_num++;
+    } while(time_num < timeout_ms);
+ 
+diff --git a/libraries/ESPhost/src/EspSpiDriver.cpp b/libraries/ESPhost/src/EspSpiDriver.cpp
+index 0ea89fb..b8a209d 100644
+--- a/libraries/ESPhost/src/EspSpiDriver.cpp
++++ b/libraries/ESPhost/src/EspSpiDriver.cpp
+@@ -31,6 +31,26 @@
+ #include "EspSpiDriver.h"
+ #include "EspChipManager.h"
+ 
++#if ESPHOST_USE_ARDUINO_SPI
++#include <SPI.h>
++#include <string.h>
++
++/* ESP32-C3 SPI link: 24 MHz requested (same R_SPI_CalculateBitrate() input as
++   the original FSP configuration), CPOL = 1, CPHA = 0 (SPI_MODE2), MSB first */
++static const arduino::SPISettings esp_spi_settings(24000000, MSBFIRST, SPI_MODE2);
++#endif
++
++/* Default (no-op) bus arbitration hooks. A sketch or library that shares SPI1
++   with another device overrides them with strong definitions. */
++extern "C" __attribute__((weak)) bool esphost_spi_bus_acquire(void) { return true; }
++extern "C" __attribute__((weak)) void esphost_spi_bus_release(void) { }
++extern "C" __attribute__((weak)) void esphost_spi_handshake_wait(void) {
++   R_BSP_SoftwareDelay(100, BSP_DELAY_UNITS_MICROSECONDS);
++}
++extern "C" __attribute__((weak)) void esphost_wait_1ms(void) {
++   R_BSP_SoftwareDelay(1000, BSP_DELAY_UNITS_MICROSECONDS);
++}
++
+ /* #####################
+  * Configuration defines 
+  * ##################### */
+@@ -52,15 +72,15 @@
+ static volatile unsigned int pi_msg_to_get_from_esp32 = 0;
+ 
+ 
+-static volatile uint8_t esp32_spi_rx_buffer[MAX_SPI_BUFFER_SIZE];
+-static volatile uint8_t esp32_spi_tx_buffer[MAX_SPI_BUFFER_SIZE];
++static volatile uint8_t __attribute__((aligned(4))) esp32_spi_rx_buffer[MAX_SPI_BUFFER_SIZE];
++static volatile uint8_t __attribute__((aligned(4))) esp32_spi_tx_buffer[MAX_SPI_BUFFER_SIZE];
+ 
+-static spi_instance_ctrl_t  _esp_host_spi_ctrl;
+-static spi_cfg_t            _esp_host_spi_cfg;
++static spi_instance_ctrl_t  _esp_host_spi_ctrl __attribute__((unused));
++static spi_cfg_t            _esp_host_spi_cfg __attribute__((unused));
+ #ifdef USE_SCI_SPI_FSP_API
+ static sci_spi_extended_cfg_t _sci_spi_ext_cfg;
+ #else
+-static spi_extended_cfg_t   _esp_host_spi_ext_cfg;
++static spi_extended_cfg_t   _esp_host_spi_ext_cfg __attribute__((unused));
+ #endif
+ 
+ static int spi_rx_waiting = 0;
+@@ -99,7 +119,7 @@ static spi_event_t _spi_cb_status = SPI_EVENT_TRANSFER_ABORTED;
+  * PRIVATE Functions declaration
+  * ############################# */
+ 
+-static void spi_callback(spi_callback_args_t *p_args);
++static void spi_callback(spi_callback_args_t *p_args) __attribute__((unused));
+ 
+ 
+ /* execute SPI communication, send the content of tx_buffer to ESP32, put the
+@@ -144,6 +164,13 @@ int esp_host_spi_init(void) {
+     *  SPI
+     * +++++ */
+ 
++#if ESPHOST_USE_ARDUINO_SPI
++   /* SPI1 (P100-P102) is shared with the UWB Shield: go through the
++      ArduinoSPI object so that there is a single owner of the SPI1
++      registers, no second FSP instance and no second IRQ registration. */
++   SPI1.begin();
++   spi_set_keep_open(&SPI1, true);
++#else
+    /*  INIT SPI peripheral PINs */
+    #ifdef USE_SCI_SPI_FSP_API
+    R_IOPORT_PinCfg(&g_ioport_ctrl, ESP_MISO, (uint32_t) (IOPORT_CFG_PERIPHERAL_PIN | IOPORT_PERIPHERAL_SCI0_2_4_6_8));
+@@ -242,6 +269,8 @@ int esp_host_spi_init(void) {
+       return ESP_HOSTED_SPI_DRIVER_SPI_FAIL_OPEN;
+    }
+    
++#endif /* ESPHOST_USE_ARDUINO_SPI */
++   
+    CEspChipManager::getInstance().initialize();
+    spi_driver_initialized = true;
+    return ESP_HOSTED_SPI_DRIVER_OK; 
+@@ -399,6 +428,54 @@ int esp_host_send_and_receive(void) {
+    /* VERIFY IF ESP32 is ready to accept a SPI transaction */
+    bool esp_ready = false;
+    bsp_io_level_t handshake;
++#if ESPHOST_USE_ARDUINO_SPI
++   (void)time_num;
++   /* Poll HANDSHAKE for up to ESP_HANDSHAKE_TIMEOUT_MS (the original loop was
++      5000 x 100 us). The wait hook lets an RTOS-aware build yield the CPU
++      instead of busy-waiting at the caller's priority. */
++   uint32_t const hs_start = millis();
++   do {
++      R_IOPORT_PinRead(NULL, HANDSHAKE, &handshake);
++      esp_ready = (handshake == BSP_IO_LEVEL_HIGH);
++      if(esp_ready) {
++         break;
++      }
++      esphost_spi_handshake_wait();
++   } while((millis() - hs_start) < ESP_HANDSHAKE_TIMEOUT_MS);
++
++   if(esp_ready) {
++      /* The bus is shared with other SPI1 users (e.g. the UWB Shield).
++         acquire() must not return true while another device is selected.
++         Everything up to release() is non-blocking. */
++      if(!esphost_spi_bus_acquire()) {
++         rv = ESP_HOSTED_SPI_BUS_BUSY;
++      }
++      else {
++         /* Remember what the other SPI1 user configured: it may have called
++            beginTransaction() already and be about to assert its own CS. */
++         arduino::SPISettings const prev_settings = SPI1.getSettings();
++         SPI1.beginTransaction(esp_spi_settings);
++
++         /* Put CS LOW */
++         R_IOPORT_PinWrite(NULL, ESP_CS, BSP_IO_LEVEL_LOW);
++         R_BSP_SoftwareDelay(100, BSP_DELAY_UNITS_MICROSECONDS);
++
++         /* ArduinoSPI::transfer(buf, len) is full duplex and in place */
++         memcpy((void *)esp32_spi_rx_buffer, (const void *)esp32_spi_tx_buffer, MAX_SPI_BUFFER_SIZE);
++         SPI1.transfer((void *)esp32_spi_rx_buffer, MAX_SPI_BUFFER_SIZE);
++
++         R_IOPORT_PinWrite(NULL, ESP_CS, BSP_IO_LEVEL_HIGH);
++         SPI1.beginTransaction(prev_settings);
++         esphost_spi_bus_release();
++
++         spi_transaction_in_progress = false;
++         rv = ESP_HOSTED_SPI_DRIVER_OK;
++      }
++   }
++   else {
++      rv = ESP_HOSTED_SPI_ESP_NOT_READY;
++   }
++#else
+    do {
+       R_IOPORT_PinRead(NULL, HANDSHAKE, &handshake);
+       esp_ready = (handshake == BSP_IO_LEVEL_HIGH);
+@@ -484,6 +561,8 @@ int esp_host_send_and_receive(void) {
+       rv = ESP_HOSTED_SPI_ESP_NOT_READY;
+    }
+ 
++#endif /* ESPHOST_USE_ARDUINO_SPI */
++
+    /* in any case de-select ESP32 */
+    R_IOPORT_PinWrite(NULL, ESP_CS, BSP_IO_LEVEL_HIGH);
+ 
+diff --git a/libraries/ESPhost/src/EspSpiDriver.h b/libraries/ESPhost/src/EspSpiDriver.h
+index c2db4be..a44089e 100644
+--- a/libraries/ESPhost/src/EspSpiDriver.h
++++ b/libraries/ESPhost/src/EspSpiDriver.h
+@@ -45,6 +45,37 @@ using CbkFuncRx_f = void(*)();
+ #define ESP_HOSTED_SPI_TX_RX_ABORTED          6
+ #define ESP_HOSTED_SPI_TIMEOUT                7
+ #define ESP_HOSTED_MSG_PREPARATION_ERROR      9
++#define ESP_HOSTED_SPI_BUS_BUSY               10  /* SPI1 held by another device */
++
++/* Use the shared ArduinoSPI SPI1 object instead of a private FSP instance on
++   the same hardware channel. Required when SPI1 is shared (UWB Shield). */
++#ifndef ESPHOST_USE_ARDUINO_SPI
++#define ESPHOST_USE_ARDUINO_SPI 1
++#endif
++
++#ifndef ESP_HANDSHAKE_TIMEOUT_MS
++#define ESP_HANDSHAKE_TIMEOUT_MS 500
++#endif
++
++/* SPI1 arbitration hooks (weak, no-op by default).
++   - esphost_spi_bus_acquire(): called right before ESP_CS goes LOW. Return
++     false if the bus cannot be taken; the transaction is then skipped and
++     esp_host_spi_transaction() reports ESP_HOSTED_SPI_BUS_BUSY.
++     When it returns true, nothing may block until esphost_spi_bus_release().
++   - esphost_spi_handshake_wait(): called between HANDSHAKE polls.
++   - esphost_wait_1ms(): called between control-response polls. */
++#ifdef __cplusplus
++extern "C" {
++#endif
++bool esphost_spi_bus_acquire(void);
++void esphost_spi_bus_release(void);
++void esphost_spi_handshake_wait(void);
++/* ~1 ms pause between polls while waiting for a control response
++   (CEspControl::wait_for_answer). Default: R_BSP_SoftwareDelay(1 ms). */
++void esphost_wait_1ms(void);
++#ifdef __cplusplus
++}
++#endif
+ 
+ /* init the SPI driver */
+ int esp_host_spi_init(void);
+diff --git a/libraries/SPI/SPI.cpp b/libraries/SPI/SPI.cpp
+index 239b77c..a84cb50 100644
+--- a/libraries/SPI/SPI.cpp
++++ b/libraries/SPI/SPI.cpp
+@@ -166,6 +166,9 @@ void ArduinoSPI::begin()
+ 
+ void ArduinoSPI::end()
+ {
++  if (spi_is_kept_open(this)) {
++    return;
++  }
+   if (_is_sci) {
+     _close(&_spi_sci_ctrl);
+   } else {
+@@ -300,6 +303,10 @@ void ArduinoSPI::beginTransaction(arduino::SPISettings settings)
+   if (!_is_initialized)
+     begin();
+ 
++  /* Register writes and the _settings update must not be split by a context
++     switch: another task sharing this bus restores getSettings() afterwards. */
++  uint32_t const primask = __get_PRIMASK();
++  __disable_irq();
+   if (_settings != settings)
+   {
+     configSpiSettings(settings);
+@@ -314,6 +321,7 @@ void ArduinoSPI::beginTransaction(arduino::SPISettings settings)
+     }
+     */
+   }
++  __set_PRIMASK(primask);
+ }
+ 
+ /**************************************************************************************
+@@ -576,3 +584,36 @@ ArduinoSPI SPI(PIN_SPI_MISO, PIN_SPI_MOSI, PIN_SPI_SCK, FORCE_SPI_MODE);
+ #if SPI_HOWMANY > 1
+ ArduinoSPI SPI1(PIN_SPI1_MISO, PIN_SPI1_MOSI, PIN_SPI1_SCK, FORCE_SPI1_MODE);
+ #endif
++
++/**************************************************************************************
++ * SHARED BUS SUPPORT
++ **************************************************************************************/
++
++static arduino::ArduinoSPI * _spi_keep_open[2] = { nullptr, nullptr };
++
++void spi_set_keep_open(arduino::ArduinoSPI * spi, bool keep)
++{
++  size_t const n = sizeof(_spi_keep_open) / sizeof(_spi_keep_open[0]);
++  for (size_t i = 0; i < n; i++) {
++    if (_spi_keep_open[i] == spi) {
++      if (!keep) _spi_keep_open[i] = nullptr;
++      return;
++    }
++  }
++  if (!keep) return;
++  for (size_t i = 0; i < n; i++) {
++    if (_spi_keep_open[i] == nullptr) {
++      _spi_keep_open[i] = spi;
++      return;
++    }
++  }
++}
++
++bool spi_is_kept_open(arduino::ArduinoSPI const * spi)
++{
++  size_t const n = sizeof(_spi_keep_open) / sizeof(_spi_keep_open[0]);
++  for (size_t i = 0; i < n; i++) {
++    if (_spi_keep_open[i] == spi) return true;
++  }
++  return false;
++}
+diff --git a/libraries/SPI/SPI.h b/libraries/SPI/SPI.h
+index ffab671..cb48b53 100644
+--- a/libraries/SPI/SPI.h
++++ b/libraries/SPI/SPI.h
+@@ -77,6 +77,11 @@ public:
+     virtual void beginTransaction(arduino::SPISettings settings);
+     virtual void endTransaction(void) { }
+ 
++    /* Settings applied by the last beginTransaction(). Non-virtual on purpose:
++       precompiled users (e.g. libUWBShieldApi.a) keep the same vtable and
++       object layout. Used to restore the bus after a foreign transaction. */
++    arduino::SPISettings getSettings() const { return _settings; }
++
+     // SPI Configuration methods
+     virtual void attachInterrupt() { }
+     virtual void detachInterrupt() { }
+@@ -140,4 +145,10 @@ extern arduino::ArduinoSPI SPI;
+ extern arduino::ArduinoSPI SPI1;
+ #endif
+ 
++/* Shared-bus support: while kept open, end() on this instance is ignored so
++   that one user (e.g. the UWB stack deinit) cannot close the bus under another
++   user (e.g. the ESP32 Wi-Fi link on SPI1). */
++void spi_set_keep_open(arduino::ArduinoSPI * spi, bool keep);
++bool spi_is_kept_open(arduino::ArduinoSPI const * spi);
++
+ #endif
+diff --git a/libraries/lwIpWrapper/src/CNetIf.cpp b/libraries/lwIpWrapper/src/CNetIf.cpp
+index 6d2d3a4..36d87b6 100644
+--- a/libraries/lwIpWrapper/src/CNetIf.cpp
++++ b/libraries/lwIpWrapper/src/CNetIf.cpp
+@@ -88,6 +88,8 @@ CLwipIf::CLwipIf()
+     , dns_num(-1)
+     , willing_to_start_sync_req(false)
+     , async_requests_ongoing(true)
++    , external_task_mode(false)
++    , sync_lock_depth(0)
+ {
+     /* -------------------------------------------------------------------------- */
+     /* Initialize lwIP stack, singletone implementation guarantees that lwip is
+@@ -129,6 +131,7 @@ CLwipIf::CLwipIf()
+ void CLwipIf::lwip_task()
+ {
+     /* -------------------------------------------------------------------------- */
++    CLwipLock lock;
+     if (CLwipIf::wifi_hw_initialized)
+         CEspControl::getInstance().communicateWithEsp();
+ 
+@@ -217,6 +220,7 @@ int CLwipIf::ping(IPAddress ip, uint8_t ttl)
+ 
+     while (!requestCbkData.endMillis && (millis() - requestCbkData.startMillis) <= 5000) {
+         CLwipIf::getInstance().lwip_task();
++        lwipwrap_poll_yield();
+     }
+ 
+     CLwipIf::getInstance().restartAsyncRequest();
+@@ -888,6 +892,36 @@ int CLwipIf::resetLowPowerMode()
+     return rv;
+ }
+ 
++/* -------------------------------------------------------------------------- */
++void CLwipIf::setExternalTaskMode(bool enable)
++{
++    /* -------------------------------------------------------------------------- */
++    if (enable == external_task_mode) {
++        return;
++    }
++    if (enable) {
++        /* let the timer ISR finish its current lwip_task() and switch itself
++           off at a safe point (same handshake used by synchronous requests) */
++        startSyncRequest();
++#ifdef LWIP_USE_TIMER
++        timer.disable_overflow_irq();
++#endif
++        async_requests_ongoing = false;
++        external_task_mode = true;
++    } else {
++        external_task_mode = false;
++        async_requests_ongoing = true;
++#ifdef LWIP_USE_TIMER
++        timer.enable_overflow_irq();
++#endif
++    }
++}
++
++/* Default no-op lock (single context use, original behaviour) */
++extern "C" __attribute__((weak)) void lwipwrap_lock(void) { }
++extern "C" __attribute__((weak)) void lwipwrap_unlock(void) { }
++extern "C" __attribute__((weak)) void lwipwrap_poll_yield(void) { }
++
+ #ifdef LWIP_USE_TIMER
+ /* -------------------------------------------------------------------------- */
+ void CLwipIf::timer_cb(timer_callback_args_t *arg) {
+@@ -916,6 +950,7 @@ void CLwipIf::dns_callback(const char *name, const ip_addr_t *ipaddr, void *call
+ int8_t CLwipIf::get_ip_address_from_hostname(const char* hostname, uint32_t* ipaddr)
+ {
+     /* -------------------------------------------------------------------------- */
++    CLwipLock lock;
+     ip_addr_t iphost;
+     err_t err;
+     unsigned long dns_request_sent = 0;
+@@ -934,6 +969,7 @@ int8_t CLwipIf::get_ip_address_from_hostname(const char* hostname, uint32_t* ipa
+         dns_request_sent = millis();
+         while (*ipaddr == 0) {
+             lwip_task();
++            lwipwrap_poll_yield();
+             if ((millis() - dns_request_sent) >= TIMEOUT_DNS_REQUEST) {
+                 ret = -1;
+                 break;
+@@ -1247,6 +1283,8 @@ bool CNetIf::dhcp_request()
+         if (!acquired && ((millis() - startTime) > dhcp_timeout)) {
+             break;
+         }
++        /* DHCP advances in lwip_task(): let the polling task run */
++        lwipwrap_poll_yield();
+ 
+     } while (!acquired);
+ 
+@@ -1259,7 +1297,11 @@ void CNetIf::dhcp_reset()
+     /* -------------------------------------------------------------------------- */
+     /* it resets the DHCP status to IDLE */
+     while (dhcp_st != DHCP_IDLE_STATUS) {
+-        task();
++        {
++            CLwipLock lock;
++            task();
++        }
++        lwipwrap_poll_yield();
+     }
+ }
+ 
+diff --git a/libraries/lwIpWrapper/src/CNetIf.h b/libraries/lwIpWrapper/src/CNetIf.h
+index 21a1eba..ae40b53 100644
+--- a/libraries/lwIpWrapper/src/CNetIf.h
++++ b/libraries/lwIpWrapper/src/CNetIf.h
+@@ -33,6 +33,33 @@
+ #include "FspTimer.h"
+ #endif
+ 
++/* ---------------------------------------------------------------------------
++ * Coexistence hooks (weak, no-op by default)
++ * lwipwrap_lock()/lwipwrap_unlock() must implement a RECURSIVE lock. They are
++ * called around lwip_task(), the socket wrappers and synchronous ESP requests.
++ * A strong implementation (e.g. the PortentaUWBWiFiCoex library) must turn
++ * them into no-ops when called from an ISR or before the scheduler runs.
++ * ------------------------------------------------------------------------- */
++#ifdef __cplusplus
++extern "C" {
++#endif
++void lwipwrap_lock(void);
++void lwipwrap_unlock(void);
++/* called inside wrapper polling loops (DNS, ping, DHCP, TCP connect/write)
++   so that an RTOS build can yield; default: no-op */
++void lwipwrap_poll_yield(void);
++#ifdef __cplusplus
++}
++
++class CLwipLock {
++public:
++    CLwipLock() { lwipwrap_lock(); }
++    ~CLwipLock() { lwipwrap_unlock(); }
++    CLwipLock(CLwipLock const&) = delete;
++    CLwipLock& operator=(CLwipLock const&) = delete;
++};
++#endif
++
+ #define MAX_SOFAT_CONNECTION_DEF 5
+ #define NETWORK_INTERFACES_MAX_NUM 3
+ #define MAX_HOSTNAME_DIM 253
+@@ -325,6 +352,9 @@ private:
+     int dns_num;
+     bool willing_to_start_sync_req;
+     bool async_requests_ongoing;
++    /* true: lwip_task() is driven by an RTOS task, the timer IRQ is off */
++    volatile bool external_task_mode;
++    int sync_lock_depth;
+ 
+     friend CWifiStation;
+     friend CWifiSoftAp;
+@@ -368,6 +398,12 @@ public:
+ 
+     void startSyncRequest()
+     {
++        if (external_task_mode) {
++            /* the polling task cannot run lwip_task() while we hold the lock */
++            lwipwrap_lock();
++            sync_lock_depth++;
++            return;
++        }
+         if (async_requests_ongoing) {
+             synchronized
+             {
+@@ -381,6 +417,13 @@ public:
+ 
+     void restartAsyncRequest()
+     {
++        if (external_task_mode) {
++            if (sync_lock_depth > 0) {
++                sync_lock_depth--;
++                lwipwrap_unlock();
++            }
++            return;
++        }
+         async_requests_ongoing = true;
+         delay(10);
+         timer.enable_overflow_irq();
+@@ -442,6 +485,13 @@ public:
+     int setWifiMode(WifiMode_t mode);
+ 
+     void lwip_task();
++
++    /* Coexistence mode. enable=true stops the 100 Hz timer IRQ that runs
++       lwip_task() (and the ESP32 SPI traffic) from interrupt context; the
++       caller must then call lwip_task() periodically from a task.
++       enable=false restores the timer IRQ. */
++    void setExternalTaskMode(bool enable);
++    bool isExternalTaskMode() const { return external_task_mode; }
+     /*
+      * PING
+      */
+diff --git a/libraries/lwIpWrapper/src/lwipClient.cpp b/libraries/lwIpWrapper/src/lwipClient.cpp
+index 9172db3..d6e2819 100644
+--- a/libraries/lwIpWrapper/src/lwipClient.cpp
++++ b/libraries/lwIpWrapper/src/lwipClient.cpp
+@@ -33,6 +33,7 @@ lwipClient::lwipClient(struct tcp_struct* tcpClient)
+ /* -------------------------------------------------------------------------- */
+ int lwipClient::connect(const char* host, uint16_t port)
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     /* -------------------------------------------------------------------------- */
+     IPAddress remote_addr;
+ 
+@@ -47,6 +48,7 @@ int lwipClient::connect(const char* host, uint16_t port)
+ /* -------------------------------------------------------------------------- */
+ int lwipClient::connect(IPAddress ip, uint16_t port)
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     /* -------------------------------------------------------------------------- */
+     if (_tcp_client == NULL) {
+         /* Allocates memory for client */
+@@ -79,6 +81,7 @@ int lwipClient::connect(IPAddress ip, uint16_t port)
+     startTime = millis();
+     while (_tcp_client->state == TCP_NONE) {
+         CLwipIf::getInstance().lwip_task();
++        lwipwrap_poll_yield();
+         if ((_tcp_client->state == TCP_CLOSING) || ((millis() - startTime) >= _timeout)) {
+             stop();
+             return 0;
+@@ -91,6 +94,7 @@ int lwipClient::connect(IPAddress ip, uint16_t port)
+ /* -------------------------------------------------------------------------- */
+ size_t lwipClient::write(uint8_t b)
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     /* -------------------------------------------------------------------------- */
+     return write(&b, 1);
+ }
+@@ -98,6 +102,7 @@ size_t lwipClient::write(uint8_t b)
+ /* -------------------------------------------------------------------------- */
+ size_t lwipClient::write(const uint8_t* buf, size_t size)
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     /* -------------------------------------------------------------------------- */
+     if ((_tcp_client == NULL) || (_tcp_client->pcb == NULL) || (buf == NULL) || (size == 0)) {
+         return 0;
+@@ -135,6 +140,7 @@ size_t lwipClient::write(const uint8_t* buf, size_t size)
+             return 0;
+         }
+         CLwipIf::getInstance().lwip_task();
++        lwipwrap_poll_yield();
+ 
+     } while (bytes_sent != size);
+ 
+@@ -144,6 +150,7 @@ size_t lwipClient::write(const uint8_t* buf, size_t size)
+ /* -------------------------------------------------------------------------- */
+ int lwipClient::available()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     /* -------------------------------------------------------------------------- */
+     CLwipIf::getInstance().lwip_task();
+     if (_tcp_client != NULL) {
+@@ -155,6 +162,7 @@ int lwipClient::available()
+ /* -------------------------------------------------------------------------- */
+ int lwipClient::read()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     /* -------------------------------------------------------------------------- */
+     uint8_t b;
+     if ((_tcp_client != NULL) && (_tcp_client->data.p != NULL)) {
+@@ -170,6 +178,7 @@ int lwipClient::read()
+ /* -------------------------------------------------------------------------- */
+ int lwipClient::read(uint8_t* buf, size_t size)
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     /* -------------------------------------------------------------------------- */
+     if ((_tcp_client != NULL) && (_tcp_client->data.p != NULL)) {
+         __disable_irq();
+@@ -183,6 +192,7 @@ int lwipClient::read(uint8_t* buf, size_t size)
+ /* -------------------------------------------------------------------------- */
+ int lwipClient::peek()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     /* -------------------------------------------------------------------------- */
+     uint8_t b;
+     // Unlike recv, peek doesn't check to see if there's any data available, so we must
+@@ -198,6 +208,7 @@ int lwipClient::peek()
+ /* -------------------------------------------------------------------------- */
+ void lwipClient::flush()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     /* -------------------------------------------------------------------------- */
+     if ((_tcp_client == NULL) || (_tcp_client->pcb == NULL)) {
+         return;
+@@ -209,6 +220,7 @@ void lwipClient::flush()
+ /* -------------------------------------------------------------------------- */
+ void lwipClient::stop()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     /* -------------------------------------------------------------------------- */
+     if (_tcp_client == NULL) {
+         return;
+@@ -223,6 +235,7 @@ void lwipClient::stop()
+ /* -------------------------------------------------------------------------- */
+ uint8_t lwipClient::connected()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     /* -------------------------------------------------------------------------- */
+     uint8_t s = status();
+     return ((available() && (s == TCP_CLOSING)) || (s == TCP_CONNECTED) || (s == TCP_ACCEPTED));
+@@ -231,6 +244,7 @@ uint8_t lwipClient::connected()
+ /* -------------------------------------------------------------------------- */
+ uint8_t lwipClient::status()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     if (_tcp_client == NULL) {
+         return TCP_NONE;
+     }
+@@ -260,6 +274,7 @@ returns always 0. */
+ /* -------------------------------------------------------------------------- */
+ uint8_t lwipClient::getSocketNumber()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     /* -------------------------------------------------------------------------- */
+     return 0;
+ }
+diff --git a/libraries/lwIpWrapper/src/lwipServer.cpp b/libraries/lwIpWrapper/src/lwipServer.cpp
+index be42b2a..79a7539 100644
+--- a/libraries/lwIpWrapper/src/lwipServer.cpp
++++ b/libraries/lwIpWrapper/src/lwipServer.cpp
+@@ -17,6 +17,7 @@ lwipServer::lwipServer(uint16_t port)
+ 
+ void lwipServer::begin()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     if (_tcp_server.pcb != NULL) {
+         return;
+     }
+@@ -42,12 +43,14 @@ void lwipServer::begin()
+ 
+ void lwipServer::begin(uint16_t port)
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     _port = port;
+     begin();
+ }
+ 
+ void lwipServer::accept()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     /* Free client if disconnected */
+     for (int n = 0; n < MAX_CLIENT; n++) {
+         if (_tcp_client[n] != NULL) {
+@@ -62,6 +65,7 @@ void lwipServer::accept()
+ 
+ lwipClient lwipServer::available()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     accept();
+ 
+     for (int n = 0; n < MAX_CLIENT; n++) {
+@@ -84,11 +88,13 @@ lwipClient lwipServer::available()
+ 
+ size_t lwipServer::write(uint8_t b)
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     return write(&b, 1);
+ }
+ 
+ size_t lwipServer::write(const uint8_t* buffer, size_t size)
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     size_t n = 0;
+ 
+     accept();
+diff --git a/libraries/lwIpWrapper/src/lwipUDP.cpp b/libraries/lwIpWrapper/src/lwipUDP.cpp
+index 0ea680f..22f615d 100644
+--- a/libraries/lwIpWrapper/src/lwipUDP.cpp
++++ b/libraries/lwIpWrapper/src/lwipUDP.cpp
+@@ -51,6 +51,7 @@ lwipUDP::lwipUDP() { }
+ /* Start lwipUDP socket, listening at local IP ip and port PORT */
+ uint8_t lwipUDP::begin(IPAddress ip, uint16_t port, bool multicast)
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     // Can create a single udp connection per socket
+     if (_udp.pcb != NULL) {
+         return 0;
+@@ -95,12 +96,14 @@ uint8_t lwipUDP::begin(IPAddress ip, uint16_t port, bool multicast)
+    will return zero if parsePacket hasn't been called yet */
+ int lwipUDP::available()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     return _remaining;
+ }
+ 
+ /* Release any resources being used by this lwipUDP instance */
+ void lwipUDP::stop()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     if (_udp.pcb != NULL) {
+         udp_disconnect(_udp.pcb);
+         udp_remove(_udp.pcb);
+@@ -112,6 +115,7 @@ void lwipUDP::stop()
+ 
+ int lwipUDP::beginPacket(const char* host, uint16_t port)
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     // Look up the host first
+     int ret = 0;
+     // DNSClient dns;
+@@ -127,6 +131,7 @@ int lwipUDP::beginPacket(const char* host, uint16_t port)
+ 
+ int lwipUDP::beginPacket(IPAddress ip, uint16_t port)
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     if (_udp.pcb == NULL) {
+         return 0;
+     }
+@@ -142,6 +147,7 @@ int lwipUDP::beginPacket(IPAddress ip, uint16_t port)
+ 
+ int lwipUDP::endPacket()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     if ((_udp.pcb == NULL) || (_data == NULL)) {
+         return 0;
+     }
+@@ -163,11 +169,13 @@ int lwipUDP::endPacket()
+ 
+ size_t lwipUDP::write(uint8_t byte)
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     return write(&byte, 1);
+ }
+ 
+ size_t lwipUDP::write(const uint8_t* buffer, size_t size)
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     __disable_irq();
+     _data = pbuffer_put_data(_data, buffer, size);
+     __enable_irq();
+@@ -180,6 +188,7 @@ size_t lwipUDP::write(const uint8_t* buffer, size_t size)
+ 
+ int lwipUDP::parsePacket()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     // discard any remaining bytes in the last packet
+     // while (_remaining) {
+     //   // could this fail (loop endlessly) if _remaining > 0 and recv in read fails?
+@@ -203,6 +212,7 @@ int lwipUDP::parsePacket()
+ 
+ int lwipUDP::read()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     uint8_t byte;
+ 
+     if (_udp.data.p == NULL) {
+@@ -221,6 +231,7 @@ int lwipUDP::read()
+ 
+ int lwipUDP::read(unsigned char* buffer, size_t len)
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     if (_udp.data.p == NULL) {
+         return -1;
+     }
+@@ -253,6 +264,7 @@ int lwipUDP::read(unsigned char* buffer, size_t len)
+ 
+ int lwipUDP::peek()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     uint8_t b;
+     // Unlike recv, peek doesn't check to see if there's any data available, so we must.
+     // If the user hasn't called parsePacket yet then return nothing otherwise they
+@@ -266,18 +278,21 @@ int lwipUDP::peek()
+ 
+ void lwipUDP::flush()
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     // TODO: we should wait for TX buffer to be emptied
+ }
+ 
+ /* Start lwipUDP socket, listening at local port PORT */
+ uint8_t lwipUDP::beginMulticast(IPAddress ip, uint16_t port)
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     return begin(ip, port, true);
+ }
+ 
+ #if LWIP_UDP
+ void lwipUDP::onDataArrival(std::function<void()> onDataArrival_fn)
+ {
++    CLwipLock lock; /* coexistence: serialize lwIP access */
+     _udp.onDataArrival = onDataArrival_fn;
+ }
+ #endif
+-- 
+2.43.0
+
