@@ -7,7 +7,8 @@ success criteria of the plan.
 Criteria checked at the end (defaults follow the plan, all adjustable):
   * no stall: no gap between ranging packets longer than --stall-s
   * delivery: received / produced >= --min-delivery (produced = seq span)
-Exit code 0 when both pass, 1 otherwise, 2 when nothing was received.
+Exit code 0 when both pass, 1 otherwise, 2 when nothing was received
+(including no packet within --wait-s).
 """
 import argparse
 import csv
@@ -24,6 +25,8 @@ def parse_args(argv=None):
     p.add_argument("--port", type=int, default=9000)
     p.add_argument("--duration", type=float, default=600.0,
                    help="seconds to run after the first packet (default 600 = 10 min)")
+    p.add_argument("--wait-s", type=float, default=120.0,
+                   help="give up if no packet arrives within this many seconds (default 120, 0 = wait forever)")
     p.add_argument("--stall-s", type=float, default=2.0,
                    help="a gap longer than this between ranging packets counts as a stall")
     p.add_argument("--min-delivery", type=float, default=0.99)
@@ -106,9 +109,13 @@ def run(args, sock):
         writer.writerow(["wall", "seq", "t_ms", "mac", "d_cm"])
     sock.settimeout(0.5)
     next_report = None
+    started = time.monotonic()
     try:
         while True:
             now = time.monotonic()
+            if st.first_wall is None and args.wait_s > 0 and now - started >= args.wait_s:
+                print(f"no packet within {args.wait_s:.0f}s", flush=True)
+                break
             if st.first_wall is not None:
                 if now - st.first_wall >= args.duration:
                     break
@@ -205,7 +212,7 @@ def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((args.bind, args.port))
     print(f"listening on {args.bind}:{args.port} for {args.duration:.0f}s "
-          f"after the first packet", flush=True)
+          f"after the first packet (first-packet wait {args.wait_s:.0f}s)", flush=True)
     code, _ = run(args, sock)
     return code
 
