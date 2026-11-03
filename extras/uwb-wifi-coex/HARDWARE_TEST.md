@@ -22,6 +22,15 @@ PortentaUWBShield 1.0.2의 `UWBRangingController`·`UWBRangingControlee`는 상�
 1:N 모드(`ANCHOR_ONE_TO_ONE 0`, 상대 0x2222·0x3333)는 아직 Controlee 태그와 측거가 되지 않는다(2026-11-03, 맥에서 확인).
 측거 확인의 판정은 앵커 쪽 `seq` 증가(또는 `CoexTag`의 `ok=` 증가)로 한다.
 
+## 멈춤 진단 (공존 라이브러리)
+
+`CoexAnchorUdp`는 `setup()` 맨 앞에서 `UWBWiFiCoex.printBootReport(Serial)`를 부르고, `setup()` 끝에서 `startWatchdog(2000)`을 켠다.
+
+- loop가 2초 넘게 멈추면 워치독이 보드를 리셋한다. assert나 HardFault는 그 자리에서 기록하고 바로 리셋한다. 물리 리셋은 필요 없다.
+- 다음 부팅의 `[coex-boot]` 줄이 직전 실행의 마지막 체크포인트(락, 버스 획득·해제, net 태스크 단계, loop)와 assert의 file:line, 또는 HardFault의 PC/LR/CFSR을 보여 준다.
+- PC/LR은 같은 빌드의 elf로 해석한다: `arm-none-eabi-addr2line -f -C -e <elf> <pc> <lr>`.
+- 워치독 리셋 뒤 USB 시리얼이 다시 열거되므로, 캡처 도구는 포트가 다시 나타나면 다시 열어야 한다.
+
 ## G1 – 원인 확정 (원본 코어)
 
 1. 패치하지 않은 코어로 `sketches/ReproIssue12`를 앵커 보드에 올린다.
