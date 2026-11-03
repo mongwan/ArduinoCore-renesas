@@ -45,8 +45,20 @@ void udp_receive_callback(void* arg, struct udp_pcb* pcb, struct pbuf* p,
 
 #endif /* LWIP_UDP */
 
-/* Constructor */
-lwipUDP::lwipUDP() { }
+/* Constructor. Members must be initialised: an instance created with new
+   (heap, not zero-filled) otherwise starts with a garbage _udp.pcb, and
+   begin() then fails with "socket already open". */
+lwipUDP::lwipUDP()
+    : _port(0)
+    , _data(NULL)
+    , _remaining(0)
+{
+    _udp.pcb = NULL;
+    _udp.data.p = NULL;
+    _udp.data.available = 0;
+    _udp.port = 0;
+    ip_addr_set_zero(&_udp.ip);
+}
 
 /* Start lwipUDP socket, listening at local IP ip and port PORT */
 uint8_t lwipUDP::begin(IPAddress ip, uint16_t port, bool multicast)
