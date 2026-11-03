@@ -41,7 +41,11 @@ volatile uint32_t s_busAcquireUs = 0;
 /* net task */
 QueueHandle_t s_udpQueue = nullptr;
 TaskHandle_t s_netTask = nullptr;
-WiFiUDP* s_udp = nullptr;
+/* Static storage (zero-initialised). A WiFiUDP created with new starts with
+   garbage members on cores without patches/0003 and its begin() fails. */
+WiFiUDP s_udpObj;
+WiFiUDP* const s_udp = &s_udpObj;
+volatile bool s_udpReady = false;
 
 volatile UWBWiFiCoexStats s_stats = {};
 
@@ -255,8 +259,14 @@ bool UWBWiFiCoex_::begin(const UWBWiFiCoexConfig& cfg) {
     return false;
   }
 
-  s_udp = new WiFiUDP();
-  if (s_udp == nullptr) {
+  /* Open the socket while lwIP is still driven by the timer IRQ, so that a
+     failure leaves everything as it was. */
+  s_udpReady = s_udp->begin(s_cfg.udpLocalPort) == 1;
+  if (!s_udpReady) {
+    vQueueDelete(s_udpQueue);
+    s_udpQueue = nullptr;
+    vSemaphoreDelete(s_lockSem);
+    s_lockSem = nullptr;
     return false;
   }
 
@@ -264,8 +274,6 @@ bool UWBWiFiCoex_::begin(const UWBWiFiCoexConfig& cfg) {
      in interrupt context (it preempted UWB transfers on the same bus). */
   CLwipIf::getInstance().setExternalTaskMode(true);
   s_active = true;
-
-  s_udp->begin(s_cfg.udpLocalPort);
 
   if (xTaskCreate(netTask, "uwbcoex-net", s_cfg.netTaskStackWords, nullptr,
                   s_cfg.netTaskPriority, &s_netTask) != pdPASS) {
@@ -308,6 +316,7 @@ UWBWiFiCoexStats UWBWiFiCoex_::stats() const {
   memcpy(&s, (const void*)&s_stats, sizeof(s));
   taskEXIT_CRITICAL();
   s.freeHeapMin = xPortGetMinimumEverFreeHeapSize();
+  s.udpSocketOk = s_udpReady;
   return s;
 }
 
@@ -318,7 +327,8 @@ void UWBWiFiCoex_::printStats(Print& out) const {
   out.print(" timeout=");             out.print(s.espBusTimeouts);
   out.print(" wait_max_ms=");         out.print(s.maxBusWaitMs);
   out.print(" hold_max_us=");         out.print(s.maxBusHoldUs);
-  out.print(" | udp q=");             out.print(s.udpQueued);
+  out.print(" | udp sock=");         out.print(s.udpSocketOk ? "ok" : "FAIL");
+  out.print(" q=");                   out.print(s.udpQueued);
   out.print(" sent=");                out.print(s.udpSent);
   out.print(" err=");                 out.print(s.udpSendErrors);
   out.print(" drop=");                out.print(s.udpDropped);

@@ -1,0 +1,47 @@
+From e1e171c9bca68fa7c7f63dd752e8467892b844c3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 23:32:20 +0000
+Subject: [PATCH] lwipUDP: initialise members in the constructor
+
+lwipUDP() left _udp.pcb, _data and the receive state uninitialised. A
+static or global WiFiUDP is zero-filled so nothing showed, but one created
+with new starts with a garbage _udp.pcb: begin() then returns 0 ("socket
+already open") and every beginPacket() fails. Seen on hardware with a
+heap-allocated WiFiUDP (all sends failed, nothing reached the PC).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01A3m3TFiwD564ej3SMfu7jv
+---
+ libraries/lwIpWrapper/src/lwipUDP.cpp | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/libraries/lwIpWrapper/src/lwipUDP.cpp b/libraries/lwIpWrapper/src/lwipUDP.cpp
+index ff1fa79..4718eba 100644
+--- a/libraries/lwIpWrapper/src/lwipUDP.cpp
++++ b/libraries/lwIpWrapper/src/lwipUDP.cpp
+@@ -45,8 +45,20 @@ void udp_receive_callback(void* arg, struct udp_pcb* pcb, struct pbuf* p,
+ 
+ #endif /* LWIP_UDP */
+ 
+-/* Constructor */
+-lwipUDP::lwipUDP() { }
++/* Constructor. Members must be initialised: an instance created with new
++   (heap, not zero-filled) otherwise starts with a garbage _udp.pcb, and
++   begin() then fails with "socket already open". */
++lwipUDP::lwipUDP()
++    : _port(0)
++    , _data(NULL)
++    , _remaining(0)
++{
++    _udp.pcb = NULL;
++    _udp.data.p = NULL;
++    _udp.data.available = 0;
++    _udp.port = 0;
++    ip_addr_set_zero(&_udp.ip);
++}
+ 
+ /* Start lwipUDP socket, listening at local IP ip and port PORT */
+ uint8_t lwipUDP::begin(IPAddress ip, uint16_t port, bool multicast)
+-- 
+2.43.0
+

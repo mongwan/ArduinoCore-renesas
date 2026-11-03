@@ -55,12 +55,15 @@ struct UWBWiFiCoexStats {
   uint32_t netLoops;
   uint32_t netLoopMaxUs;       /* longest lwip_task() + queue drain           */
   size_t   freeHeapMin;        /* xPortGetMinimumEverFreeHeapSize()           */
+  bool     udpSocketOk;        /* internal UDP socket opened by begin()       */
 };
 
 class UWBWiFiCoex_ {
 public:
-  /* Returns false if already started or if a FreeRTOS object could not be
-     created (heap). */
+  /* Returns false if already started, if a FreeRTOS object could not be
+     created (heap), or if the internal UDP socket could not be opened
+     (Wi-Fi not connected yet, or no free lwIP UDP PCB: MEMP_NUM_UDP_PCB is 3
+     in the precompiled liblwIP.a and DHCP/DNS use some of them). */
   bool begin(const UWBWiFiCoexConfig& cfg = UWBWiFiCoexConfig());
   bool isRunning() const { return _running; }
 
