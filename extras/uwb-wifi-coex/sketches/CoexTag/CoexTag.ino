@@ -20,6 +20,8 @@
 
 static volatile uint32_t g_cb = 0, g_ok = 0, g_lastD = 0;
 static volatile uint32_t g_status[8] = {0};  // 0x00, 0x21, 0x26, 0x81, 0x82, 0x87, other
+static volatile uint32_t g_otherCount[256] = {0};  // per-code count of "other"
+static volatile uint8_t g_lastOther = 0;
 
 static int statusSlot(uint8_t st) {
   switch (st) {
@@ -40,6 +42,10 @@ static void rangingHandler(UWBRangingData& rangingData) {
   for (int j = 0; j < rangingData.available(); j++) {
     int const k = statusSlot(twr[j].status);
     g_status[k] = g_status[k] + 1;
+    if (k == 6) {
+      g_lastOther = twr[j].status;
+      g_otherCount[twr[j].status] = g_otherCount[twr[j].status] + 1;
+    }
     if (twr[j].status == 0 && twr[j].distance != 0xFFFF) {
       g_ok = g_ok + 1;
       g_lastD = twr[j].distance;
@@ -87,8 +93,22 @@ void loop() {
     Serial.print(" status[00/21/26/81/82/87/other]=");
     for (int i = 0; i < 7; i++) {
       Serial.print(g_status[i]);
-      Serial.print(i < 6 ? "/" : "\n");
+      Serial.print(i < 6 ? "/" : "");
     }
+    if (g_status[6] > 0) {
+      // which "other" codes: last one and the most frequent one
+      uint8_t top = 0;
+      for (int c = 1; c < 256; c++) {
+        if (g_otherCount[c] > g_otherCount[top]) top = (uint8_t)c;
+      }
+      Serial.print(" other_last=0x");
+      Serial.print(g_lastOther, HEX);
+      Serial.print(" other_top=0x");
+      Serial.print(top, HEX);
+      Serial.print("x");
+      Serial.print(g_otherCount[top]);
+    }
+    Serial.println();
     digitalWrite(LEDR, !digitalRead(LEDR));
   }
   delay(50);
