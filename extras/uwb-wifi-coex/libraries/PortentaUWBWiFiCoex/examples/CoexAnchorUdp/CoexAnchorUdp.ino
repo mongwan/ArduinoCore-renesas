@@ -40,6 +40,15 @@
 #ifndef COEX_SEND_ALL
 #define COEX_SEND_ALL 0
 #endif
+
+/*
+ * COEX_NO_WIFI = 1: baseline for success criterion 4 (ranging rate with
+ * Wi-Fi off). Skips WiFi.begin() and UWBWiFiCoex.begin(); UWB, the serial
+ * "[uwb] cb=" line and the watchdog work as usual, nothing is sent.
+ */
+#ifndef COEX_NO_WIFI
+#define COEX_NO_WIFI 0
+#endif
 static volatile uint32_t g_uwbCallbacks = 0;  // ranging notifications seen
 
 static const IPAddress kServer(SERVER_IP);
@@ -83,6 +92,7 @@ void setup() {
   pinMode(LEDR, OUTPUT);
   digitalWrite(LEDR, LOW);
 
+#if !COEX_NO_WIFI
   // 1) Wi-Fi first, in the stock timer-IRQ mode
   Serial.print("Wi-Fi ...");
   while (WiFi.begin(SECRET_SSID, SECRET_PASS) != WL_CONNECTED) {
@@ -97,6 +107,9 @@ void setup() {
     Serial.println("UWBWiFiCoex.begin() failed (FreeRTOS heap?)");
     while (true) delay(1000);
   }
+#else
+  Serial.println("COEX_NO_WIFI: Wi-Fi off (ranging-rate baseline)");
+#endif
 
   // 3) UWB
   uint8_t devAddr[] = {0x11, 0x11};
