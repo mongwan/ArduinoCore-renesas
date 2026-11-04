@@ -33,7 +33,7 @@ lwipClient::lwipClient(struct tcp_struct* tcpClient)
 /* -------------------------------------------------------------------------- */
 int lwipClient::connect(const char* host, uint16_t port)
 {
-    CLwipLock lock; /* coexistence: serialize lwIP access */
+    /* coexistence: no lock here; the DNS wait and connect(ip) lock per step */
     /* -------------------------------------------------------------------------- */
     IPAddress remote_addr;
 
@@ -48,8 +48,12 @@ int lwipClient::connect(const char* host, uint16_t port)
 /* -------------------------------------------------------------------------- */
 int lwipClient::connect(IPAddress ip, uint16_t port)
 {
-    CLwipLock lock; /* coexistence: serialize lwIP access */
     /* -------------------------------------------------------------------------- */
+    /* coexistence: hold the lwIP lock for each step, not for the whole wait.
+       Otherwise a peer that does not answer blocks every other lwIP user
+       (the polling task, UDP senders) for up to _timeout ms. */
+    {
+    CLwipLock lock;
     if (_tcp_client == NULL) {
         /* Allocates memory for client */
         _tcp_client = (struct tcp_struct*)mem_malloc(sizeof(struct tcp_struct));
@@ -70,19 +74,34 @@ int lwipClient::connect(IPAddress ip, uint16_t port)
     _tcp_client->data.available = 0;
     _tcp_client->state = TCP_NONE;
 
-    uint32_t startTime = millis();
     ip_addr_t ipaddr;
     tcp_arg(_tcp_client->pcb, _tcp_client);
     if (ERR_OK != tcp_connect(_tcp_client->pcb, u8_to_ip_addr(rawIPAddress(ip), &ipaddr), port, &tcp_connected_callback)) {
         stop();
         return 0;
     }
+    }
 
-    startTime = millis();
-    while (_tcp_client->state == TCP_NONE) {
-        CLwipIf::getInstance().lwip_task();
-        lwipwrap_poll_yield();
-        if ((_tcp_client->state == TCP_CLOSING) || ((millis() - startTime) >= _timeout)) {
+    uint32_t const waitStart = millis();
+    for (;;) {
+        tcp_client_states state;
+        {
+            CLwipLock lock;
+            CLwipIf::getInstance().lwip_task();
+            state = _tcp_client->state;
+        }
+        if (state != TCP_NONE) {
+            break;
+        }
+        if ((millis() - waitStart) >= _timeout) {
+            stop();
+            return 0;
+        }
+        lwipwrap_poll_yield(); /* lock released: other tasks can use lwIP */
+    }
+    {
+        CLwipLock lock;
+        if (_tcp_client->state == TCP_CLOSING) {
             stop();
             return 0;
         }
@@ -94,7 +113,7 @@ int lwipClient::connect(IPAddress ip, uint16_t port)
 /* -------------------------------------------------------------------------- */
 size_t lwipClient::write(uint8_t b)
 {
-    CLwipLock lock; /* coexistence: serialize lwIP access */
+    /* coexistence: write(buf, size) locks per step */
     /* -------------------------------------------------------------------------- */
     return write(&b, 1);
 }
@@ -102,47 +121,61 @@ size_t lwipClient::write(uint8_t b)
 /* -------------------------------------------------------------------------- */
 size_t lwipClient::write(const uint8_t* buf, size_t size)
 {
-    CLwipLock lock; /* coexistence: serialize lwIP access */
     /* -------------------------------------------------------------------------- */
-    if ((_tcp_client == NULL) || (_tcp_client->pcb == NULL) || (buf == NULL) || (size == 0)) {
+    /* coexistence: lock per step and yield without the lock, as in connect().
+       The original loop also had no limit: a peer that stops reading kept the
+       caller (and, with the lock held, every lwIP user) here forever. Give up
+       after _timeout ms without progress. */
+    if ((buf == NULL) || (size == 0)) {
         return 0;
     }
 
-    /* If client not connected or accepted, it can't write because connection is
-    not ready */
-    if ((_tcp_client->state != TCP_ACCEPTED) && (_tcp_client->state != TCP_CONNECTED)) {
-        return 0;
-    }
-
-    size_t max_send_size, bytes_to_send;
     size_t bytes_sent = 0;
-    size_t bytes_left = size;
-    err_t res;
+    uint32_t lastProgress = millis();
 
-    do {
-        max_send_size = tcp_sndbuf(_tcp_client->pcb);
-        bytes_to_send = bytes_left > max_send_size ? max_send_size : bytes_left;
-
-        if (bytes_to_send > 0) {
-            res = tcp_write(_tcp_client->pcb, &buf[bytes_sent], bytes_to_send, TCP_WRITE_FLAG_COPY);
-
-            if (res == ERR_OK) {
-                bytes_sent += bytes_to_send;
-                bytes_left = size - bytes_sent;
-            } else if (res != ERR_MEM) {
-                // other error, cannot continue
+    for (;;) {
+        {
+            CLwipLock lock;
+            if ((_tcp_client == NULL) || (_tcp_client->pcb == NULL)) {
                 return 0;
             }
+            /* If client not connected or accepted, it can't write because
+               connection is not ready */
+            if ((_tcp_client->state != TCP_ACCEPTED) && (_tcp_client->state != TCP_CONNECTED)) {
+                return 0;
+            }
+
+            size_t const bytes_left = size - bytes_sent;
+            size_t const max_send_size = tcp_sndbuf(_tcp_client->pcb);
+            size_t const bytes_to_send = bytes_left > max_send_size ? max_send_size : bytes_left;
+
+            if (bytes_to_send > 0) {
+                err_t const res = tcp_write(_tcp_client->pcb, &buf[bytes_sent], bytes_to_send, TCP_WRITE_FLAG_COPY);
+
+                if (res == ERR_OK) {
+                    bytes_sent += bytes_to_send;
+                    lastProgress = millis();
+                } else if (res != ERR_MEM) {
+                    // other error, cannot continue
+                    return 0;
+                }
+            }
+
+            // Force to send data right now!
+            if (ERR_OK != tcp_output(_tcp_client->pcb)) {
+                return 0;
+            }
+            CLwipIf::getInstance().lwip_task();
         }
 
-        // Force to send data right now!
-        if (ERR_OK != tcp_output(_tcp_client->pcb)) {
+        if (bytes_sent == size) {
+            break;
+        }
+        if ((millis() - lastProgress) >= _timeout) {
             return 0;
         }
-        CLwipIf::getInstance().lwip_task();
-        lwipwrap_poll_yield();
-
-    } while (bytes_sent != size);
+        lwipwrap_poll_yield(); /* lock released: other tasks can use lwIP */
+    }
 
     return size;
 }

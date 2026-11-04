@@ -950,14 +950,17 @@ void CLwipIf::dns_callback(const char *name, const ip_addr_t *ipaddr, void *call
 int8_t CLwipIf::get_ip_address_from_hostname(const char* hostname, uint32_t* ipaddr)
 {
     /* -------------------------------------------------------------------------- */
-    CLwipLock lock;
+    /* coexistence: lock per step and wait without the lock (see lwipClient::connect) */
     ip_addr_t iphost;
     err_t err;
     unsigned long dns_request_sent = 0;
     int8_t ret = 0;
 
     *ipaddr = 0;
-    err = dns_gethostbyname(hostname, &iphost, &dns_callback, ipaddr);
+    {
+        CLwipLock lock;
+        err = dns_gethostbyname(hostname, &iphost, &dns_callback, ipaddr);
+    }
 
     switch (err) {
     case ERR_OK:
@@ -968,7 +971,10 @@ int8_t CLwipIf::get_ip_address_from_hostname(const char* hostname, uint32_t* ipa
     case ERR_INPROGRESS:
         dns_request_sent = millis();
         while (*ipaddr == 0) {
-            lwip_task();
+            lwip_task(); /* takes the lock itself */
+            if (*ipaddr != 0) {
+                break;
+            }
             lwipwrap_poll_yield();
             if ((millis() - dns_request_sent) >= TIMEOUT_DNS_REQUEST) {
                 ret = -1;
