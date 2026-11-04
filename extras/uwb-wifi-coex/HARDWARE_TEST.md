@@ -19,7 +19,9 @@ PortentaUWBShield 1.0.2의 `UWBRangingController`·`UWBRangingControlee`는 상�
 세션 시작이 거부되거나(reason 0x8D, 0x35 등) 상대가 응답하지 않는다(status 0x21). `CoexTag`는 이 버그를 우회한다(`analysis/upstream_issue_peer_address.md`).
 
 앵커 스케치(`CoexAnchorUdp`, `ReproIssue12`)는 기본이 1:1 모드(`ANCHOR_ONE_TO_ONE 1`, 상대 0x2222)다.
-1:N 모드(`ANCHOR_ONE_TO_ONE 0`, 상대 0x2222·0x3333)는 아직 Controlee 태그와 측거가 되지 않는다(2026-11-03, 맥에서 확인).
+1:N 모드(`ANCHOR_ONE_TO_ONE 0`, 상대 0x2222·0x3333)에서는 태그를 `TAG_MULTICAST 1`로 빌드한다. `UWBRangingOneToMany`는 앵커를 멀티캐스트로, `UWBRangingControlee`는 태그를 항상 유니캐스트로 설정하므로 그대로는 태그가 응답하지 않는다. 멀티캐스트 태그로 60초 동안 305/305 성공했다(2026-11-04).
+
+두 보드는 50 cm 이상 떨어뜨려 둔다. 5 cm 이내에서는 측정 결과가 전부 `0x1B`(측정 성공, 거리 음수)로 나와 앵커가 거리를 보내지 않고, `udp_rx_stats.py`에는 공백(stall)으로 잡힌다(2026-11-04: 5 cm 이내 275/275가 0x1B, 50 cm에서 275/275 정상). G3의 2.6초 공백 2회도 이것으로 설명된다.
 측거 확인의 판정은 앵커 쪽 `seq` 증가(또는 `CoexTag`의 `ok=` 증가)로 한다.
 
 ## 멈춤 진단 (공존 라이브러리)

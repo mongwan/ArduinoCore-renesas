@@ -87,11 +87,18 @@ ARM GCC 13.2(Ubuntu 패키지)로 빌드했다. 공식 IDE는 GCC 7-2017q4를 �
 | ESP 드라이버 | 최종 코드에서 `R_SPI_Open`·IRQ 등록 참조 없음. 호출 순서 HANDSHAKE → acquire → beginTransaction → transfer → 설정 복원 → release 확인 |
 | 수신기 | `udp_rx_stats.py --selftest` 통과 (손실 3개, 2.5 s 공백 1회를 정확히 검출) |
 
-## 검증하지 못한 것
+## 검증 상태 (2026-11-04, 사무실 PC, 공식 Arduino 툴체인 빌드)
 
-- 실제 보드에서의 동작 전부. 특히 ESP32-C3가 `SPI1` 폴링 전송(16.7 MHz 예상, 1600 B)과 바뀐 타이밍을 그대로 받아들이는지.
-- 1:N(`UWBRangingOneToMany`) 앵커와 Controlee 태그의 측거. 1:1은 `CoexTag` 우회로 측거가 되는 것을 맥에서 확인했다(2026-11-03).
-- 공식 GCC 7-2017q4 빌드. IDE에서 한 번 빌드해 경고·오류가 없는지 확인해야 한다.
+하드웨어에서 확인한 것:
+- G2(650초)·G3(1800초): UDP 전달률 99.99% 이상, SPI 버스 timeout 0, 리셋 0. Wi-Fi 끈 기준선 대비 측거 성능 저하 없음.
+- 원인 단독 증명(`SpiClobberRepro`): 빌드 옵션 `ESPHOST_USE_ARDUINO_SPI` 하나만 바꿔 실패와 정상이 갈린다.
+- 수신(PC→보드 에코, 초당 50개까지), TCP(HTTP POST), TCP 서버 장애(패치 0004)에서 손실·드롭 0.
+- 1:N(`UWBRangingOneToMany`)은 태그를 `TAG_MULTICAST 1`로 빌드하면 동작한다. 측거 실패 코드 `0x1B`는 보드가 5 cm 이내일 때 나오는 음수 거리 보고다.
+
+아직 확인하지 않은 것:
+- 태그 여러 대(실제 1:N)와 실제 사용 세션 설정(채널, 주기, STS)으로의 장시간 시험.
+- 앵커가 BLE까지 함께 쓰는 경우(UWB + Wi-Fi + BLE).
+- Arduino Stella를 태그로 쓰는 경우. 앵커 쪽 수정과는 무관하지만, 태그 쪽 설정(멀티캐스트 등)은 StellaUWB 라이브러리에서 따로 확인해야 한다.
 
 ## 계획서 대비 바뀐 점
 

@@ -20,7 +20,12 @@
  * ANCHOR_ONE_TO_ONE = 1 (default): UWBRangingController with one peer (0x2222).
  *   Verified on hardware with the CoexTag sketch on the other board.
  * ANCHOR_ONE_TO_ONE = 0: UWBRangingOneToMany with peers 0x2222 and 0x3333.
- *   Not working yet with a Controlee tag (all measurements status 0x21).
+ *   The tag must be built with TAG_MULTICAST=1 (sketches/CoexTag): the
+ *   library's Controlee class is always unicast and does not answer a
+ *   multicast controller (verified 2026-11-04: 305/305 with multicast).
+ *
+ * Keep the boards at least ~50 cm apart: a few cm apart every result is
+ * 0x1B (OK, negative distance), which this sketch does not send.
  *
  * PortentaUWBShield 1.0.2 bug: UWBRangingController/UWBRangingControlee keep
  * a pointer to the dstAddr copy their constructor received, so PEER_ADDRESS
