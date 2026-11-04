@@ -38,8 +38,12 @@ struct UWBWiFiCoexConfig {
   uint32_t busWaitTimeoutMs = 500;
   /* UDP send queue, drained by the net task. */
   uint8_t udpQueueDepth = 8;
-  /* Local UDP port used by sendUdp(). 0 = any. */
+  /* Local UDP port used by sendUdp(). 0 = any. Set a fixed port when
+     receiving, so that the peer knows where to send. */
   uint16_t udpLocalPort = 0;
+  /* UDP receive queue for receiveUdp(). 0 = receiving disabled: incoming
+     datagrams on the internal socket are left to the wrapper and dropped. */
+  uint8_t udpRxQueueDepth = 0;
 };
 
 struct UWBWiFiCoexStats {
@@ -56,6 +60,9 @@ struct UWBWiFiCoexStats {
   uint32_t netLoopMaxUs;       /* longest lwip_task() + queue drain           */
   size_t   freeHeapMin;        /* xPortGetMinimumEverFreeHeapSize()           */
   bool     udpSocketOk;        /* internal UDP socket opened by begin()       */
+  uint32_t udpReceived;        /* datagrams put in the receive queue          */
+  uint32_t udpRxDropped;       /* receive queue full, payload too large, or
+                                  received in an interrupt                    */
 };
 
 class UWBWiFiCoex_ {
@@ -71,6 +78,13 @@ public:
      (not from an ISR). Returns false when the queue is full. */
   bool sendUdp(const IPAddress& ip, uint16_t port, const uint8_t* data, size_t len);
   bool sendUdp(const IPAddress& ip, uint16_t port, const char* text);
+
+  /* Takes one datagram from the receive queue (needs udpRxQueueDepth > 0).
+     Waits up to waitMs for one; this counts as blocking for loop(). Returns
+     the payload length (datagrams longer than UWBCOEX_UDP_MAX_PAYLOAD are
+     dropped and counted, longer than cap are truncated), or -1 if none. */
+  int receiveUdp(uint8_t* buf, size_t cap, IPAddress* fromIp = nullptr,
+                 uint16_t* fromPort = nullptr, uint32_t waitMs = 0);
 
   UWBWiFiCoexStats stats() const;
   void printStats(Print& out) const;

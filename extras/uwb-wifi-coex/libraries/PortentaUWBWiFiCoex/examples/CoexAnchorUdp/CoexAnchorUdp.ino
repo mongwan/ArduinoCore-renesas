@@ -9,6 +9,7 @@
  * Every 5 s a stats line is sent and printed:
  *   {"type":"s","seq":340,"t":...,"acq":..,"defer":..,"tmo":..,"drop":..,"heap":..}
  * Run tools/udp_rx_stats.py on the PC to measure loss and stalls.
+ * With COEX_RX_ECHO=1 also run tools/udp_echo_test.py (PC -> board direction).
  */
 #include <PortentaUWBShield.h>
 #include <WiFiC3.h>
@@ -49,6 +50,23 @@
 #ifndef COEX_NO_WIFI
 #define COEX_NO_WIFI 0
 #endif
+
+/*
+ * COEX_RX_ECHO = 1: receive test (PC -> board). The board listens on UDP
+ * port COEX_ECHO_PORT and sends every datagram it receives back to the
+ * sender, while ranging and the normal UDP stream to the PC go on.
+ * PC: python3 tools/udp_echo_test.py --board <board IP> --port 9001
+ * The serial stats line gets " | rx=.. rxdrop=..", plus an "[echo]" line.
+ */
+#ifndef COEX_RX_ECHO
+#define COEX_RX_ECHO 0
+#endif
+#ifndef COEX_ECHO_PORT
+#define COEX_ECHO_PORT 9001
+#endif
+#if COEX_RX_ECHO && COEX_NO_WIFI
+#error "COEX_RX_ECHO needs Wi-Fi (COEX_NO_WIFI=0)"
+#endif
 static volatile uint32_t g_uwbCallbacks = 0;  // ranging notifications seen
 
 static const IPAddress kServer(SERVER_IP);
@@ -56,6 +74,8 @@ static const uint16_t kPort = SERVER_PORT;
 
 static volatile uint32_t g_seq = 0;        // ranging results produced
 static volatile uint32_t g_enqueueFail = 0;
+static uint32_t g_echoed = 0;              // COEX_RX_ECHO: datagrams sent back
+static uint32_t g_echoFail = 0;            // COEX_RX_ECHO: send queue full
 
 static void rangingHandler(UWBRangingData& rangingData) {
   if (rangingData.measureType() != (uint8_t)uwb::MeasurementType::TWO_WAY) {
@@ -76,7 +96,8 @@ static void rangingHandler(UWBRangingData& rangingData) {
                      twr[j].peer_addr[1], twr[j].peer_addr[0], (unsigned)twr[j].distance,
                      (unsigned)twr[j].status);
     // never block the UWB callback: drop (and count) if the queue is full
-    if (n <= 0 || !UWBWiFiCoex.sendUdp(kServer, kPort, (const uint8_t*)line, (size_t)n)) {
+    if (n <= 0 || n >= (int)sizeof(line) ||
+        !UWBWiFiCoex.sendUdp(kServer, kPort, (const uint8_t*)line, (size_t)n)) {
       g_enqueueFail = g_enqueueFail + 1;
     }
   }
@@ -103,10 +124,21 @@ void setup() {
   Serial.println(WiFi.localIP());
 
   // 2) switch lwIP to the net task and arm the SPI1 CS guard
-  if (!UWBWiFiCoex.begin()) {
+  UWBWiFiCoexConfig cfg;
+#if COEX_RX_ECHO
+  cfg.udpLocalPort = COEX_ECHO_PORT;
+  cfg.udpRxQueueDepth = 8;
+#endif
+  if (!UWBWiFiCoex.begin(cfg)) {
     Serial.println("UWBWiFiCoex.begin() failed (FreeRTOS heap?)");
     while (true) delay(1000);
   }
+#if COEX_RX_ECHO
+  Serial.print("COEX_RX_ECHO: echo on ");
+  Serial.print(WiFi.localIP());
+  Serial.print(":");
+  Serial.println(COEX_ECHO_PORT);
+#endif
 #else
   Serial.println("COEX_NO_WIFI: Wi-Fi off (ranging-rate baseline)");
 #endif
@@ -163,14 +195,44 @@ void loop() {
                      (unsigned long)s.espBusAcquired, (unsigned long)s.espBusDeferrals,
                      (unsigned long)s.espBusTimeouts, (unsigned long)g_enqueueFail,
                      (unsigned)s.freeHeapMin);
-    if (n > 0) {
+    if (n > 0 && n < (int)sizeof(line)) {
       UWBWiFiCoex.sendUdp(kServer, kPort, (const uint8_t*)line, (size_t)n);
     }
     // UWB health without a tag: ranging notifications per 5 s (~25 at 200 ms)
     Serial.print("[uwb] cb=");
     Serial.println(g_uwbCallbacks);
     UWBWiFiCoex.printStats(Serial);
+#if COEX_RX_ECHO
+    Serial.print("[echo] echoed=");
+    Serial.print(g_echoed);
+    Serial.print(" fail=");
+    Serial.println(g_echoFail);
+#endif
     digitalWrite(LEDR, !digitalRead(LEDR));
   }
+#if COEX_RX_ECHO
+  // Block here instead of delay(50): wait for datagrams for up to 50 ms and
+  // send each one back to where it came from.
+  uint8_t buf[UWBCOEX_UDP_MAX_PAYLOAD];
+  IPAddress from;
+  uint16_t fromPort = 0;
+  uint32_t const t0 = millis();
+  for (;;) {
+    uint32_t const used = millis() - t0;
+    if (used >= 50) {
+      break;
+    }
+    int const n = UWBWiFiCoex.receiveUdp(buf, sizeof(buf), &from, &fromPort, 50 - used);
+    if (n < 0) {
+      break;
+    }
+    if (UWBWiFiCoex.sendUdp(from, fromPort, buf, (size_t)n)) {
+      g_echoed = g_echoed + 1;
+    } else {
+      g_echoFail = g_echoFail + 1;
+    }
+  }
+#else
   delay(50);
+#endif
 }

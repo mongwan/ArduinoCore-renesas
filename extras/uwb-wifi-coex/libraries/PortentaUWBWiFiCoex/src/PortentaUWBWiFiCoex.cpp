@@ -9,12 +9,15 @@
  *                                the scheduler suspended for the transfer
  *  3. net task                   calls lwip_task() every netPeriodMs and
  *                                drains the UDP send queue
+ *  4. UDP receive (optional)     datagrams for the internal socket go to a
+ *                                queue read by receiveUdp()
  */
 #include "PortentaUWBWiFiCoex.h"
 
 #include <WiFiC3.h>
 #include "CNetIf.h"
 #include "EspSpiDriver.h"
+#include "lwipTypes.h"
 #include "coex_diag.h"
 
 namespace {
@@ -47,6 +50,10 @@ WiFiUDP s_udpObj;
 WiFiUDP* const s_udp = &s_udpObj;
 volatile bool s_udpReady = false;
 
+/* receive (udpRxQueueDepth > 0) */
+QueueHandle_t s_udpRxQueue = nullptr;
+struct udp_struct* s_udpRx = nullptr;  /* the wrapper's state for s_udpObj */
+
 volatile UWBWiFiCoexStats s_stats = {};
 
 inline bool inIsr() { return __get_IPSR() != 0; }
@@ -58,6 +65,51 @@ inline bool rtosContext() {
 
 inline bool shieldCsIdle() {
   return digitalRead(s_cfg.shieldCsPin) == HIGH;
+}
+
+/* The wrapper keeps one received datagram per socket and frees it when the
+   next one arrives, so several datagrams handled by one lwip_task() call
+   would be lost. Its receive callback calls onDataArrival right after
+   storing a datagram (inside lwip_task(), lwIP lock held): copy it to our
+   queue and empty the slot. */
+void onUdpData() {
+  struct udp_struct* const u = s_udpRx;
+  if (u == nullptr || u->data.p == nullptr) {
+    return;
+  }
+  struct pbuf* const p = u->data.p;
+  bool queued = false;
+  if (!inIsr() && s_udpRxQueue != nullptr && p->tot_len <= UWBCOEX_UDP_MAX_PAYLOAD) {
+    UdpMsg msg;
+    msg.ip = ip_addr_to_u32(&u->ip);
+    msg.port = u->port;
+    msg.len = pbuf_copy_partial(p, msg.data, p->tot_len, 0);
+    queued = xQueueSend(s_udpRxQueue, &msg, 0) == pdTRUE;
+  }
+  if (queued) {
+    s_stats.udpReceived = s_stats.udpReceived + 1;
+  } else {
+    s_stats.udpRxDropped = s_stats.udpRxDropped + 1;
+  }
+  uint32_t const primask = __get_PRIMASK();
+  __disable_irq();
+  pbuf_free(p);
+  u->data.p = nullptr;
+  u->data.available = 0;
+  __set_PRIMASK(primask);
+}
+
+/* lwipUDP keeps its udp_struct private; the pcb's recv_arg points to it. */
+struct udp_struct* findWrapperState(const void* obj, size_t size) {
+  uintptr_t const lo = (uintptr_t)obj;
+  uintptr_t const hi = lo + size;
+  for (struct udp_pcb* q = udp_pcbs; q != nullptr; q = q->next) {
+    uintptr_t const a = (uintptr_t)q->recv_arg;
+    if (a >= lo && a < hi) {
+      return (struct udp_struct*)q->recv_arg;
+    }
+  }
+  return nullptr;
 }
 
 }  // namespace
@@ -275,11 +327,31 @@ bool UWBWiFiCoex_::begin(const UWBWiFiCoexConfig& cfg) {
   CLwipIf::getInstance().setExternalTaskMode(true);
   s_active = true;
 
-  if (xTaskCreate(netTask, "uwbcoex-net", s_cfg.netTaskStackWords, nullptr,
-                  s_cfg.netTaskPriority, &s_netTask) != pdPASS) {
+  auto fail = [&]() {
+    s_udpRx = nullptr;
+    if (s_udpRxQueue != nullptr) {
+      vQueueDelete(s_udpRxQueue);
+      s_udpRxQueue = nullptr;
+    }
     s_active = false;
     CLwipIf::getInstance().setExternalTaskMode(false);
     return false;
+  };
+
+  /* Receiving: no lwip_task() runs between here and the net task start, so
+     the pcb list and the callback can be changed without the lock. */
+  if (s_cfg.udpRxQueueDepth > 0) {
+    s_udpRxQueue = xQueueCreate(s_cfg.udpRxQueueDepth, sizeof(UdpMsg));
+    s_udpRx = findWrapperState(&s_udpObj, sizeof(s_udpObj));
+    if (s_udpRxQueue == nullptr || s_udpRx == nullptr) {
+      return fail();
+    }
+    s_udp->onDataArrival(onUdpData);
+  }
+
+  if (xTaskCreate(netTask, "uwbcoex-net", s_cfg.netTaskStackWords, nullptr,
+                  s_cfg.netTaskPriority, &s_netTask) != pdPASS) {
+    return fail();
   }
 
   coex_diag_set_net_task(s_netTask);
@@ -310,6 +382,31 @@ bool UWBWiFiCoex_::sendUdp(const IPAddress& ip, uint16_t port, const char* text)
   return sendUdp(ip, port, (const uint8_t*)text, strlen(text));
 }
 
+int UWBWiFiCoex_::receiveUdp(uint8_t* buf, size_t cap, IPAddress* fromIp,
+                             uint16_t* fromPort, uint32_t waitMs) {
+  if (!_running || s_udpRxQueue == nullptr) {
+    if (waitMs > 0) {
+      vTaskDelay(pdMS_TO_TICKS(waitMs));
+    }
+    return -1;
+  }
+  UdpMsg msg;
+  if (xQueueReceive(s_udpRxQueue, &msg, pdMS_TO_TICKS(waitMs)) != pdTRUE) {
+    return -1;
+  }
+  size_t const n = (msg.len < cap) ? msg.len : cap;
+  if (buf != nullptr && n > 0) {
+    memcpy(buf, msg.data, n);
+  }
+  if (fromIp != nullptr) {
+    *fromIp = IPAddress(msg.ip);
+  }
+  if (fromPort != nullptr) {
+    *fromPort = msg.port;
+  }
+  return (int)n;
+}
+
 UWBWiFiCoexStats UWBWiFiCoex_::stats() const {
   UWBWiFiCoexStats s;
   taskENTER_CRITICAL();
@@ -334,7 +431,13 @@ void UWBWiFiCoex_::printStats(Print& out) const {
   out.print(" drop=");                out.print(s.udpDropped);
   out.print(" | net loops=");         out.print(s.netLoops);
   out.print(" loop_max_us=");         out.print(s.netLoopMaxUs);
-  out.print(" heap_min=");            out.println((unsigned long)s.freeHeapMin);
+  out.print(" heap_min=");            out.print((unsigned long)s.freeHeapMin);
+  if (s_udpRxQueue != nullptr) {
+    /* only with receiving enabled, so the default line stays as before */
+    out.print(" | rx=");              out.print(s.udpReceived);
+    out.print(" rxdrop=");            out.print(s.udpRxDropped);
+  }
+  out.println();
 }
 
 UWBWiFiCoex_ UWBWiFiCoex;

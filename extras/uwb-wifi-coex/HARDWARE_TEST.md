@@ -91,6 +91,42 @@ PortentaUWBShield 1.0.2의 `UWBRangingController`·`UWBRangingControlee`는 상�
 `delivery`는 앵커가 매긴 일련번호(`seq`) 범위 대비 수신 개수다.
 측거 결과 자체가 안 나온 구간은 `seq`가 늘지 않으므로 손실로 잡히지 않는다. 그 구간은 `stall`로 잡힌다.
 
+## 수신 방향 (PC → 보드)
+
+G1–G3은 보드가 보내기만 한다. 수신은 ESP32-C3가 먼저 "받은 데이터 있음"을 알리는 경로라 송신과 충돌 조건이 다르므로 따로 본다.
+보드 1대로 된다. 태그가 없어도 앵커는 200 ms마다 측거를 시도하고 SR150이 결과를 SPI1로 보고하므로, UWB 쪽 SPI 트래픽은 그대로 생긴다.
+
+1. `CoexAnchorUdp.ino` 맨 위에 `#define COEX_RX_ECHO 1`을 넣고 빌드해 앵커 보드에 올린다.
+   보드는 UDP 9001번 포트에서 받은 데이터그램을 보낸 쪽으로 그대로 돌려보낸다. 측거와 PC로 가는 기존 UDP 스트림은 그대로 돈다.
+2. 시리얼의 `COEX_RX_ECHO: echo on <IP>:9001`에서 보드 IP를 확인한다.
+3. PC에서 두 도구를 함께 띄운다.
+
+```bash
+python3 tools/udp_rx_stats.py --port 9000 --duration 300 --wait-s 90
+```
+
+```bash
+python3 tools/udp_echo_test.py --board <보드 IP> --port 9001 --rate 10 --duration 300
+```
+
+판정:
+
+| 항목 | 어디서 | 합격선 |
+| --- | --- | --- |
+| 수신 손실 | `udp_echo_test.py`의 `loss` | 1% 이하 |
+| 수신 공백 | 같은 도구의 `stall` | 2초 넘는 공백 0회 |
+| 보드 쪽 수신 큐 | 시리얼 `[coex] ... | rx=.. rxdrop=..` | `rxdrop` 0 |
+| 기존 송신 | `udp_rx_stats.py` | G2와 같은 기준(stall 0, delivery 99% 이상) |
+| 버스 | 시리얼 `timeout` | 0 |
+
+- 부하를 더 주려면 `--rate 20` 또는 `--rate 50`으로 올린다. 보드의 수신 큐는 8칸이고 loop가 최대 50 ms마다 비우므로, 50/s 근처부터 `rxdrop`이 생기는 것은 큐 크기 한계다.
+- `COEX_SEND_ALL 1`을 같이 켜면 실패한 측거 결과까지 초당 약 5개가 PC로 나가, 송신·수신·UWB가 동시에 버스를 쓴다.
+- `NO ECHO`가 나오면 순서대로 확인한다: 보드 IP·포트, `COEX_RX_ECHO 1` 빌드인지, PC 방화벽(파이썬의 UDP 수신 허용), 공유기의 무선 단말 간 차단.
+- 도구 확인: `python3 tools/udp_echo_test.py --selftest` (5% 손실과 2.5초 공백 1회를 검출해야 한다).
+
+라이브러리 쪽 구현: lwIP 래퍼는 소켓마다 받은 데이터그램을 한 칸에만 보관하고 다음 것이 오면 버린다.
+`udpRxQueueDepth > 0`이면 래퍼의 수신 콜백(`onDataArrival`)에서 바로 큐로 복사하고 칸을 비우므로, 한 번의 `lwip_task()`에서 여러 개가 들어와도 잃지 않는다.
+
 ## 비정상 시나리오 (5단계)
 
 - Wi-Fi AP 재부팅: `[coex]` 줄이 계속 나오는지, AP 복귀 후 `sent`가 다시 늘어나는지 본다.

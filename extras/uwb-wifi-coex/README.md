@@ -3,7 +3,7 @@
 Portenta C33에서 UWB Shield 측거와 Wi-Fi UDP 송신을 동시에 돌리기 위한 코어 패치와 공존 라이브러리다.
 [이슈 #12](https://github.com/Truesense-it/PortentaUWBShield/issues/12)의 원인 두 가지(SPI1 버스 충돌, lwIP 스레드 안전성)를 코어 쪽에서 막는다.
 
-**상태 (2026-11-03)**: 컴파일·링크까지 검증 완료. 하드웨어 동작은 아직 검증하지 않았다(`HARDWARE_TEST.md`).
+**상태 (2026-11-04)**: 하드웨어에서 G2(650초, UDP 전달 100%)와 Wi-Fi 끈 기준선 비교(성공 기준 4) 통과, G3(1800초) 진행 중. 절차는 `HARDWARE_TEST.md`.
 
 ## 구성
 
@@ -13,6 +13,7 @@ tools/apply_core_patch.sh             설치된 코어에 패치 적용/되돌�
 libraries/PortentaUWBWiFiCoex/        공존 라이브러리 + 예제 CoexAnchorUdp
 sketches/ReproIssue12/                원본 코어용 재현 스케치 (G1)
 tools/udp_rx_stats.py                 PC 수신기: 손실률·공백(stall) 측정, 성공 기준 판정
+tools/udp_echo_test.py                PC → 보드 수신 시험: COEX_RX_ECHO 빌드에 보내고 되돌아온 것으로 손실·RTT·공백 측정
 tools/build_c33.py                    arduino-cli 없이 C33 빌드 (이 결과물 검증에 사용)
 analysis/uwb_binary_findings.md       UWB 바이너리 디스어셈블 결과 (CS 핀, 태스크 우선순위 등)
 HARDWARE_TEST.md                      G1–G3 하드웨어 검증 절차
