@@ -40,6 +40,7 @@ def parse_args():
     p.add_argument("--warnings", choices=["none", "default", "all"], default="none")
     p.add_argument("--warn-paths", nargs="*", default=[],
                    help="compile files under these paths with -Wall -Wextra")
+    p.add_argument("--stack-usage", action="store_true", help="add -fstack-usage (writes .su files)")
     p.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 2)
     return p.parse_args()
 
@@ -193,6 +194,8 @@ class Builder:
                     f'-DPROJECT_NAME="{self.out/self.sketch.name}"', "-std=gnu++17", *arch,
                     "-fsigned-char", "-ffunction-sections", "-fdata-sections",
                     "-fmessage-length=0", "-fno-builtin", *self.fsp_flags()]
+        if self.a.stack_usage and src.suffix != ".S":
+            base = base + ["-fstack-usage"]
         cmd = base + self.includes() + [str(src)]
         if preprocess_only:
             cmd = [c for c in cmd if c not in ("-c", "-MMD")] + ["-E", "-o", os.devnull]
