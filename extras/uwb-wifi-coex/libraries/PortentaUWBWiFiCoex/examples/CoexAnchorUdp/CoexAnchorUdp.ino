@@ -37,6 +37,29 @@
 #endif
 
 /*
+ * Session values, for build flags (-DSESSION_ID=0x000A0001 ...). The tag must
+ * use the same ones. Each anchor ranging with the same tag needs its own
+ * session ID and preamble code (9 to 12). Addresses are stored high byte first
+ * like CoexTag, and the "mac" field prints peer_addr[1] then peer_addr[0], so a
+ * non-symmetric address may show with its bytes swapped.
+ */
+#ifndef SESSION_ID
+#define SESSION_ID 0x11223344
+#endif
+#ifndef ANCHOR_ADDR
+#define ANCHOR_ADDR 0x1111
+#endif
+#ifndef TAG_ADDR
+#define TAG_ADDR 0x2222
+#endif
+#ifndef TAG2_ADDR
+#define TAG2_ADDR 0x3333
+#endif
+#ifndef PREAMBLE
+#define PREAMBLE 10
+#endif
+
+/*
  * COEX_SEND_ALL = 1: send every measurement, failed ones too (d=65535,
  * "st" = status). For single-board tests: with no tag the controller still
  * runs a ranging round every 200 ms and the UWB chip reports each one over
@@ -250,9 +273,9 @@ void setup() {
 #endif
 
   // 3) UWB
-  uint8_t devAddr[] = {0x11, 0x11};
-  uint8_t dst1[] = {0x22, 0x22};
-  uint8_t dst2[] = {0x33, 0x33};
+  uint8_t devAddr[] = {(uint8_t)(ANCHOR_ADDR >> 8), (uint8_t)(ANCHOR_ADDR & 0xFF)};
+  uint8_t dst1[] = {(uint8_t)(TAG_ADDR >> 8), (uint8_t)(TAG_ADDR & 0xFF)};
+  uint8_t dst2[] = {(uint8_t)(TAG2_ADDR >> 8), (uint8_t)(TAG2_ADDR & 0xFF)};
   UWBMacAddress srcAddr(UWBMacAddress::Size::SHORT, devAddr);
   UWBMacAddressList dest(UWBMacAddress::Size::SHORT);
   UWBMacAddress dstAddr1(UWBMacAddress::Size::SHORT, dst1);
@@ -271,11 +294,12 @@ void setup() {
   // re-register PEER_ADDRESS from a static copy (dangling-pointer workaround).
   UWBMacAddress peerArg(UWBMacAddress::Size::SHORT, dst1);
   static UWBMacAddress peerKeep(UWBMacAddress::Size::SHORT, dst1);
-  static UWBRangingController session(0x11223344, srcAddr, peerArg);
+  static UWBRangingController session(SESSION_ID, srcAddr, peerArg);
   session.appParams.destinationMacAddr(peerKeep);
 #else
-  static UWBRangingOneToMany session(0x11223344, srcAddr, dest);
+  static UWBRangingOneToMany session(SESSION_ID, srcAddr, dest);
 #endif
+  session.appParams.preambleCodeIndex(PREAMBLE);
   UWBSessionManager.addSession(session);
   session.init();
   session.start();
