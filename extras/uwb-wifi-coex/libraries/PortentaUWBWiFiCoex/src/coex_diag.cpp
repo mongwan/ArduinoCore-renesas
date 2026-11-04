@@ -275,7 +275,18 @@ bool UWBWiFiCoex_::startWatchdog(uint32_t timeout_ms) {
   return WDT.begin(timeout_ms) == 1;
 }
 
+/* Set by the core (cores/arduino/usb/SerialUSB.cpp) when the upload tool
+   sends DFU detach: the core has written the "stay in bootloader" magic and
+   expects a watchdog reset. With our watchdog already running, its own WDT
+   setup is ignored (the WDT can only be configured once per reset) and
+   feeding it here would keep the sketch alive, so the upload fails with
+   "Lost device after RESET". Reset right away instead. */
+extern bool is_watchdog_reset_in_progress_for_upload;
+
 void UWBWiFiCoex_::loopTick() {
   coex_cp(CP_LOOP);
+  if (is_watchdog_reset_in_progress_for_upload) {
+    NVIC_SystemReset();
+  }
   WDT.refresh();
 }
