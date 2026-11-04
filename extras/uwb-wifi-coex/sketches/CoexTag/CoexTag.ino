@@ -9,6 +9,15 @@
  * (status 0x21). The address is re-registered from a static object.
  *
  * TAG_ADDR: 0x2222 for the first tag, 0x3333 for a second one (1:N mode).
+ * TAG_MULTICAST = 1: join a one-to-many session (anchor built with
+ *   ANCHOR_ONE_TO_ONE=0). UWBRangingOneToMany sets MULTI_NODE_MODE to
+ *   multicast on the controller, while UWBRangingControlee always uses
+ *   unicast; with that mismatch every measurement times out (0x21).
+ *
+ * Status codes (from the UCI definitions in libUWBShieldApi.a):
+ *   0x00 OK, 0x1B OK but negative distance (devices closer than the antenna
+ *   delay calibration, typically a few cm apart), 0x21 RX timeout (no
+ *   answer), 0x22-0x27 RX PHY/MAC decode failures.
  * Prints one summary line every 5 s:
  *   tag cb=<callbacks> ok=<valid distances> last_d=<cm> status[...]
  */
@@ -16,6 +25,9 @@
 
 #ifndef TAG_ADDR
 #define TAG_ADDR 0x2222
+#endif
+#ifndef TAG_MULTICAST
+#define TAG_MULTICAST 0
 #endif
 
 static volatile uint32_t g_cb = 0, g_ok = 0, g_lastD = 0;
@@ -75,12 +87,15 @@ void setup() {
   static UWBMacAddress peerKeep(UWBMacAddress::Size::SHORT, anchorAddr);
   static UWBRangingControlee session(0x11223344, srcAddr, dstAddr);
   session.appParams.destinationMacAddr(peerKeep);  // dangling-pointer workaround
+#if TAG_MULTICAST
+  session.rangingParams.multiNodeMode(uwb::MultiNodeMode::MULTICAST);
+#endif
   UWBSessionManager.addSession(session);
   session.init();
   session.start();
   Serial.print("tag 0x");
   Serial.print(TAG_ADDR, HEX);
-  Serial.println(" started");
+  Serial.println(TAG_MULTICAST ? " started (multicast)" : " started (unicast)");
 }
 
 void loop() {
