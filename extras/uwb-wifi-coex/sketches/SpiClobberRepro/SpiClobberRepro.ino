@@ -10,6 +10,11 @@
  * ArduinoSPI::begin() rewrote SPCR without the interrupt enables).
  * Expected with patches/0001: packets keep arriving.
  *
+ * Without reverting the core: on the patched core, build with
+ *   --build-property "compiler.cpp.extra_flags=-DESPHOST_USE_ARDUINO_SPI=0"
+ * ESPhost then uses its original FSP SPI driver (only the SPI1 sharing of
+ * patches/0001 is off; the other fixes stay) and should show the failure.
+ *
  * PC: python3 tools/udp_rx_stats.py --port 9000 --duration 60 --wait-s 60
  *     -> stall FAIL on the stock core, PASS with 0001.
  */
