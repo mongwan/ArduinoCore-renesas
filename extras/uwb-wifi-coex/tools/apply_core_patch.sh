@@ -7,7 +7,10 @@
 #   ./apply_core_patch.sh --revert [/path/to/core]
 #
 # Applies every patches/NNNN-*.patch in order (0001 coexistence, 0002 UDP
-# pbuf leak fix); --revert removes them in reverse order.
+# pbuf leak fix, 0003 UDP constructor, 0004 no lwIP lock while waiting in
+# TCP connect/write and DNS); --revert removes them in reverse order.
+# Patches already applied are skipped, so running it again after a new
+# patch was added applies only the new one.
 # Tested against core 1.5.3 and 1.6.0. Close the Arduino IDE first.
 set -euo pipefail
 

@@ -8,7 +8,7 @@ Portenta C33에서 UWB Shield 측거와 Wi-Fi UDP 송신을 동시에 돌리기 
 ## 구성
 
 ```
-patches/0001-...patch                 코어 패치 (ArduinoCore-renesas 1.5.3, 1.6.0에 그대로 적용됨)
+patches/0001~0004-...patch            코어 패치: 0001 SPI1 공유·lwIP 잠금, 0002·0003 UDP 버그, 0004 TCP·DNS 대기 중 잠금 해제 (1.5.3, 1.6.0에 그대로 적용됨)
 tools/apply_core_patch.sh             설치된 코어에 패치 적용/되돌리기 (백업 생성)
 libraries/PortentaUWBWiFiCoex/        공존 라이브러리 + 예제 CoexAnchorUdp
 sketches/ReproIssue12/                원본 코어용 재현 스케치 (G1)

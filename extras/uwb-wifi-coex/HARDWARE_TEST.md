@@ -159,6 +159,9 @@ python3 tools/udp_rx_stats.py --port 9000 --duration 300 --wait-s 90
 - 응답을 다 읽지 않고 `stop()`하면 받은 버퍼가 남을 수 있으므로, 서버가 닫을 때까지 읽는다.
 - `NOTHING RECEIVED`가 나오면 `SERVER_IP`, 빌드 옵션, PC 방화벽(파이썬의 TCP 8080 수신 허용) 순서로 확인한다.
 - 도구 확인: `python3 tools/http_sink.py --selftest` (2개 누락과 3.5초 공백을 검출해야 한다).
+- 서버 장애 시험(패치 0004 확인): 같은 빌드로 `udp_rx_stats.py`를 300초 돌리는 동안 `http_sink.py`를 0–90초와 190–280초에만 띄운다(가운데 약 100초는 서버 없음).
+  서버가 없는 동안 `[http] conn_fail`만 늘고, `[coex] drop`과 net 태스크의 `loop_max_us`는 그대로여야 하며(0004 이전에는 연결 실패마다 약 3초씩 막혔다),
+  `udp_rx_stats.py`는 stall 0, delivery 99% 이상이어야 한다.
 
 ## 비정상 시나리오 (5단계)
 
