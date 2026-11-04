@@ -59,9 +59,20 @@ if (( revert )); then
   exit 0
 fi
 
+# Find the last applied patch from the end: an earlier patch cannot be
+# reversed on its own once a later one changed the same lines.
+applied=0
+for (( i=${#patches[@]}-1; i>=0; i-- )); do
+  if patch -d "$core" -p1 -R --dry-run --quiet < "${patches[$i]}" >/dev/null 2>&1; then
+    applied=$(( i + 1 ))
+    break
+  fi
+done
+
 backup=""
-for p in "${patches[@]}"; do
-  if patch -d "$core" -p1 -R --dry-run --quiet < "$p" >/dev/null 2>&1; then
+for (( i=0; i<${#patches[@]}; i++ )); do
+  p="${patches[$i]}"
+  if (( i < applied )); then
     echo "already applied  $(basename "$p")"
     continue
   fi
