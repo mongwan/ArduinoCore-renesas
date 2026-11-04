@@ -67,6 +67,27 @@
 #if COEX_RX_ECHO && COEX_NO_WIFI
 #error "COEX_RX_ECHO needs Wi-Fi (COEX_NO_WIFI=0)"
 #endif
+
+/*
+ * COEX_HTTP_TEST = 1: TCP test. A separate task (priority 1, below the UWB
+ * tasks) sends one HTTP POST every COEX_HTTP_PERIOD_MS to SERVER_IP port
+ * COEX_HTTP_PORT, reads the whole response and closes the connection,
+ * while ranging and the UDP stream go on. loop() is not blocked by it.
+ * PC: python3 tools/http_sink.py --port 8080 --duration 300
+ * Serial: "[http] ok= conn_fail= write_fail= resp_fail= last_ms= max_ms="
+ */
+#ifndef COEX_HTTP_TEST
+#define COEX_HTTP_TEST 0
+#endif
+#ifndef COEX_HTTP_PORT
+#define COEX_HTTP_PORT 8080
+#endif
+#ifndef COEX_HTTP_PERIOD_MS
+#define COEX_HTTP_PERIOD_MS 1000
+#endif
+#if COEX_HTTP_TEST && COEX_NO_WIFI
+#error "COEX_HTTP_TEST needs Wi-Fi (COEX_NO_WIFI=0)"
+#endif
 static volatile uint32_t g_uwbCallbacks = 0;  // ranging notifications seen
 
 static const IPAddress kServer(SERVER_IP);
@@ -76,6 +97,76 @@ static volatile uint32_t g_seq = 0;        // ranging results produced
 static volatile uint32_t g_enqueueFail = 0;
 static uint32_t g_echoed = 0;              // COEX_RX_ECHO: datagrams sent back
 static uint32_t g_echoFail = 0;            // COEX_RX_ECHO: send queue full
+
+#if COEX_HTTP_TEST
+static volatile uint32_t g_httpOk = 0, g_httpConnFail = 0, g_httpWriteFail = 0;
+static volatile uint32_t g_httpRespFail = 0, g_httpLastMs = 0, g_httpMaxMs = 0;
+
+// One client object, reused: the wrapper allocates its connection state per
+// object on the first connect() and never frees it.
+static WiFiClient g_http;
+
+static void httpTask(void*) {
+  uint32_t seq = 0;
+  TickType_t last = xTaskGetTickCount();
+  for (;;) {
+    vTaskDelayUntil(&last, pdMS_TO_TICKS(COEX_HTTP_PERIOD_MS));
+    uint32_t const t0 = millis();
+    char body[64];
+    int const bl = snprintf(body, sizeof(body), "{\"seq\":%lu,\"t\":%lu}",
+                            (unsigned long)seq, (unsigned long)t0);
+    char hdr[160];
+    int const hl = snprintf(hdr, sizeof(hdr),
+                            "POST /ingest HTTP/1.1\r\nHost: coex\r\n"
+                            "Content-Type: application/json\r\nContent-Length: %d\r\n"
+                            "Connection: close\r\n\r\n", bl);
+    seq++;
+
+    g_http.setConnectionTimeout(3000);
+    if (!g_http.connect(kServer, COEX_HTTP_PORT)) {
+      g_httpConnFail = g_httpConnFail + 1;
+      g_http.stop();
+      continue;
+    }
+    if (g_http.write((const uint8_t*)hdr, hl) != (size_t)hl ||
+        g_http.write((const uint8_t*)body, bl) != (size_t)bl) {
+      g_httpWriteFail = g_httpWriteFail + 1;
+      g_http.stop();
+      continue;
+    }
+    // Read the whole response (the server closes the connection), keeping
+    // the status line. Leaving data unread would leave pbufs behind.
+    char status[16] = {0};
+    size_t got = 0;
+    uint8_t buf[64];
+    uint32_t const tr = millis();
+    while (millis() - tr < 3000) {
+      if (g_http.available() > 0) {
+        int const n = g_http.read(buf, sizeof(buf));
+        for (int i = 0; i < n && got < sizeof(status) - 1; i++) {
+          status[got++] = (char)buf[i];
+        }
+        continue;
+      }
+      if (!g_http.connected()) {
+        break;
+      }
+      vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    g_http.stop();
+    uint32_t const dt = millis() - t0;
+    g_httpLastMs = dt;
+    if (dt > g_httpMaxMs) {
+      g_httpMaxMs = dt;
+    }
+    if (got >= 12 && strncmp(status, "HTTP/1.", 7) == 0 && strncmp(status + 9, "200", 3) == 0) {
+      g_httpOk = g_httpOk + 1;
+    } else {
+      g_httpRespFail = g_httpRespFail + 1;
+    }
+  }
+}
+#endif
 
 static void rangingHandler(UWBRangingData& rangingData) {
   if (rangingData.measureType() != (uint8_t)uwb::MeasurementType::TWO_WAY) {
@@ -133,6 +224,16 @@ void setup() {
     Serial.println("UWBWiFiCoex.begin() failed (FreeRTOS heap?)");
     while (true) delay(1000);
   }
+#if COEX_HTTP_TEST
+  if (xTaskCreate(httpTask, "coex-http", 1024, nullptr, 1, nullptr) != pdPASS) {
+    Serial.println("COEX_HTTP_TEST: task create failed (FreeRTOS heap?)");
+  } else {
+    Serial.print("COEX_HTTP_TEST: POST to ");
+    Serial.print(kServer);
+    Serial.print(":");
+    Serial.println(COEX_HTTP_PORT);
+  }
+#endif
 #if COEX_RX_ECHO
   Serial.print("COEX_RX_ECHO: echo on ");
   Serial.print(WiFi.localIP());
@@ -202,6 +303,14 @@ void loop() {
     Serial.print("[uwb] cb=");
     Serial.println(g_uwbCallbacks);
     UWBWiFiCoex.printStats(Serial);
+#if COEX_HTTP_TEST
+    Serial.print("[http] ok=");      Serial.print(g_httpOk);
+    Serial.print(" conn_fail=");     Serial.print(g_httpConnFail);
+    Serial.print(" write_fail=");    Serial.print(g_httpWriteFail);
+    Serial.print(" resp_fail=");     Serial.print(g_httpRespFail);
+    Serial.print(" last_ms=");       Serial.print(g_httpLastMs);
+    Serial.print(" max_ms=");        Serial.println(g_httpMaxMs);
+#endif
 #if COEX_RX_ECHO
     Serial.print("[echo] echoed=");
     Serial.print(g_echoed);

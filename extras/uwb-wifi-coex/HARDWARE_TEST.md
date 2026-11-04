@@ -127,6 +127,39 @@ python3 tools/udp_echo_test.py --board <보드 IP> --port 9001 --rate 10 --durat
 라이브러리 쪽 구현: lwIP 래퍼는 소켓마다 받은 데이터그램을 한 칸에만 보관하고 다음 것이 오면 버린다.
 `udpRxQueueDepth > 0`이면 래퍼의 수신 콜백(`onDataArrival`)에서 바로 큐로 복사하고 칸을 비우므로, 한 번의 `lwip_task()`에서 여러 개가 들어와도 잃지 않는다.
 
+## TCP (HTTP POST)
+
+보드 1대로 한다. 앵커가 UWB 측거와 UDP 송신을 하는 동안, 별도 태스크(우선순위 1)가 1초마다 PC로 HTTP POST를 한 번씩 보낸다.
+요청마다 TCP 연결을 새로 열고, 응답을 끝까지 읽은 뒤 닫는다.
+
+1. 빌드 옵션 `COEX_HTTP_TEST=1`. 태그 없이 할 때는 `COEX_SEND_ALL=1`을 함께 켜서 UDP 송신이 흐르게 한다.
+   arduino-cli라면 `--build-property "compiler.cpp.extra_flags=-DCOEX_HTTP_TEST=1 -DCOEX_SEND_ALL=1"`를 붙인다.
+2. PC에서 두 도구를 함께 띄운다(`SERVER_IP`가 이 PC여야 한다).
+
+```bash
+python3 tools/http_sink.py --port 8080 --duration 300 --csv http.csv
+```
+
+```bash
+python3 tools/udp_rx_stats.py --port 9000 --duration 300 --wait-s 90
+```
+
+판정:
+
+| 항목 | 어디서 | 합격선 |
+| --- | --- | --- |
+| HTTP 전달 | `http_sink.py`의 `delivery` | 99% 이상 |
+| HTTP 공백 | 같은 도구의 `stall` | 3초 넘는 공백 0회 |
+| 보드 쪽 실패 | 시리얼 `[http] conn_fail= write_fail= resp_fail=` | 모두 0 |
+| 응답 시간 | 시리얼 `[http] max_ms=` | 참고값 (연결부터 응답 수신까지) |
+| 기존 송신 | `udp_rx_stats.py` | stall 0, delivery 99% 이상 |
+| 메모리 | 시리얼 `[coex] heap_min=` | 시간이 지나도 줄지 않음 |
+
+- 원본 lwIP 래퍼는 `WiFiClient` 객체마다 연결 상태 메모리를 할당하고 해제하지 않으므로, 예제는 객체 하나를 재사용한다.
+- 응답을 다 읽지 않고 `stop()`하면 받은 버퍼가 남을 수 있으므로, 서버가 닫을 때까지 읽는다.
+- `NOTHING RECEIVED`가 나오면 `SERVER_IP`, 빌드 옵션, PC 방화벽(파이썬의 TCP 8080 수신 허용) 순서로 확인한다.
+- 도구 확인: `python3 tools/http_sink.py --selftest` (2개 누락과 3.5초 공백을 검출해야 한다).
+
 ## 비정상 시나리오 (5단계)
 
 - Wi-Fi AP 재부팅: `[coex]` 줄이 계속 나오는지, AP 복귀 후 `sent`가 다시 늘어나는지 본다.
