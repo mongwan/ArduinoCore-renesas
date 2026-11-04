@@ -15,6 +15,8 @@ sketches/ReproIssue12/                원본 코어용 재현 스케치 (G1)
 tools/udp_rx_stats.py                 PC 수신기: 손실률·공백(stall) 측정, 성공 기준 판정
 tools/udp_echo_test.py                PC → 보드 수신 시험: COEX_RX_ECHO 빌드에 보내고 되돌아온 것으로 손실·RTT·공백 측정
 tools/http_sink.py                    TCP 시험 수신기: COEX_HTTP_TEST 빌드의 HTTP POST 전달률·공백 측정
+tools/flash.sh                        IDE 없이 업로드(보드 패키지의 dfu-util 사용, 여러 대면 USB 시리얼로 선택, --list)
+tools/capture.py                      시리얼 기록기: 시각 표시, 리셋·업로드로 포트가 사라지면 다시 열기 (pyserial 필요)
 tools/build_c33.py                    arduino-cli 없이 C33 빌드 (이 결과물 검증에 사용)
 analysis/uwb_binary_findings.md       UWB 바이너리 디스어셈블 결과 (CS 핀, 태스크 우선순위 등)
 HARDWARE_TEST.md                      G1–G3 하드웨어 검증 절차
